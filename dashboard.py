@@ -14,6 +14,7 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -21,7 +22,24 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from main import load_config
 from src.btc_feed import CoinbaseFeed
-from src.engine import EngineConfig, run as run_engine
+from src.engine import EngineConfig, event_close_utc, run as run_engine
+
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def _event_title(event_ticker: str) -> str:
+    """Render a Kalshi-style human title from a KXBTCD ticker.
+
+    `KXBTCD-26APR2802` → `Bitcoin · Apr 28, 2:00 AM EDT`.
+    Falls back to the raw ticker if it can't be parsed.
+    """
+    close_dt = event_close_utc(event_ticker)
+    if close_dt is None:
+        return event_ticker
+    ny = close_dt.astimezone(NY_TZ)
+    hour12 = ny.hour % 12 or 12
+    ampm = "AM" if ny.hour < 12 else "PM"
+    return f"Bitcoin · {ny.strftime('%b')} {ny.day}, {hour12}:00 {ampm} {ny.strftime('%Z')}"
 
 ROOT = Path(__file__).parent
 TEMPLATE = ROOT / "templates" / "dashboard.html"
@@ -90,6 +108,7 @@ def api_state() -> JSONResponse:
             "ready": True,
             "ts_ms": head["ts_ms"],
             "event_ticker": head["event_ticker"],
+            "event_title": _event_title(head["event_ticker"]),
             "spot": head["spot"],
             "sigma": head["sigma"],
             "minutes_left": head["minutes_left"],

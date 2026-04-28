@@ -536,7 +536,7 @@ async function refresh() {
     }
   };
 
-  flashIf("event",  data.event_ticker, v => v);
+  flashIf("event",  data.event_title || data.event_ticker, v => v);
   flashIf("spot",   data.spot,         fmtMoney);
   flashIf("sigma",  data.sigma,        fmtPct);
   closeTsMs = data.ts_ms + data.minutes_left * 60000;
