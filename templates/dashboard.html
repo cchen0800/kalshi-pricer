@@ -70,9 +70,26 @@
   }
   .grid th, .grid td {
     text-align: right;
-    padding: 6px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--rule);
   }
+  .pill {
+    display: inline-block;
+    border: 1px solid currentColor;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 70px;
+    text-align: center;
+    letter-spacing: 0.01em;
+  }
+  .pill.yes { color: var(--green); }
+  .pill.no  { color: var(--red); }
+  .pill.mute { opacity: 0.35; }
+  td.pill-cell, th.pill-cell { text-align: center; }
+  .strike-label { font-weight: 500; }
+  .strike-label .above { color: var(--fg-dim); font-weight: 400; }
   .grid th {
     color: var(--fg-dim);
     font-weight: 500;
@@ -195,13 +212,13 @@
     <thead>
       <tr>
         <th>Strike</th>
-        <th>Model %</th>
-        <th>Bid</th>
-        <th>Ask</th>
-        <th>Mid</th>
-        <th>Edge ¢</th>
+        <th>Chance</th>
+        <th>Model</th>
+        <th class="pill-cell">Yes</th>
+        <th class="pill-cell">No</th>
+        <th>Edge</th>
         <th>Action</th>
-        <th>Liquidity</th>
+        <th>Size</th>
         <th>Ticker</th>
       </tr>
     </thead>
@@ -223,9 +240,16 @@
 <script>
 const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
-const fmtPrice = n => n == null ? "—" : n.toFixed(3);
-const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1);
+const fmtPctInt = n => n == null ? "—" : Math.round(n * 100) + "%";
+const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1) + "¢";
 const fmtMin = n => n == null ? "—" : n >= 1 ? n.toFixed(1) + " min" : (n * 60).toFixed(0) + " sec";
+const strikeLabel = strike => "$" + Math.ceil(strike).toLocaleString() + ' <span class="above">or above</span>';
+const yesPill = ask => ask == null
+  ? '<span class="pill yes mute">Yes —</span>'
+  : '<span class="pill yes">Yes ' + Math.round(ask * 100) + '¢</span>';
+const noPill = bid => bid == null
+  ? '<span class="pill no mute">No —</span>'
+  : '<span class="pill no">No ' + Math.round((1 - bid) * 100) + '¢</span>';
 
 let lastTs = 0;
 let currentFilter = "all";
@@ -330,11 +354,11 @@ async function refresh() {
     const liq = (s.yes_bid_size || 0) + (s.yes_ask_size || 0);
     out.push(`
       <tr class="${[cls, atm, cold].filter(Boolean).join(" ")}">
-        <td>${fmtMoney(s.strike)}</td>
-        <td>${fmtPct(s.model_prob)}</td>
-        <td>${fmtPrice(s.yes_bid)}</td>
-        <td>${fmtPrice(s.yes_ask)}</td>
-        <td>${fmtPrice(mid)}</td>
+        <td class="strike-label">${strikeLabel(s.strike)}</td>
+        <td>${fmtPctInt(mid)}</td>
+        <td>${fmtPctInt(s.model_prob)}</td>
+        <td class="pill-cell">${yesPill(s.yes_ask)}</td>
+        <td class="pill-cell">${noPill(s.yes_bid)}</td>
         <td class="${s.edge_cents > 0 ? 'pos' : s.edge_cents < 0 ? 'neg' : ''}">${fmtCents(s.edge_cents)}</td>
         <td class="action ${a.side}">${a.side === "NONE" ? "—" : a.side + " +" + a.cents.toFixed(1) + "¢"}</td>
         <td>${liq ? liq.toFixed(0) : "—"}</td>
