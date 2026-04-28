@@ -107,6 +107,43 @@
     color: var(--fg-dim);
     font-size: 11px;
   }
+  .filters {
+    display: flex;
+    gap: 6px;
+    margin: 8px 0 14px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .filters .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    letter-spacing: 0.06em;
+    margin-right: 4px;
+  }
+  .filter-btn {
+    background: var(--bg-3);
+    color: var(--fg-dim);
+    border: 1px solid var(--rule);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+  }
+  .filter-btn:hover { background: var(--rule); color: var(--fg); }
+  .filter-btn.active {
+    background: var(--blue);
+    color: var(--bg);
+    border-color: var(--blue);
+    font-weight: 600;
+  }
+  .filter-btn .count {
+    margin-left: 6px;
+    color: inherit;
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+  }
   .pulse {
     display: inline-block;
     width: 8px; height: 8px; border-radius: 50%;
@@ -143,6 +180,15 @@
 <main>
   <div id="status" style="margin-bottom:12px; color:var(--fg-dim);">
     Waiting for first poll… (the engine runs every 30 s by default)
+  </div>
+
+  <div class="filters" id="filters" style="display:none;">
+    <span class="label">Show:</span>
+    <button class="filter-btn active" data-filter="all">All <span class="count" id="count-all">—</span></button>
+    <button class="filter-btn" data-filter="itm">ITM (strike &lt; spot) <span class="count" id="count-itm">—</span></button>
+    <button class="filter-btn" data-filter="atm">ATM ±$500 <span class="count" id="count-atm">—</span></button>
+    <button class="filter-btn" data-filter="otm">OTM (strike ≥ spot) <span class="count" id="count-otm">—</span></button>
+    <button class="filter-btn" data-filter="flagged">Flagged only <span class="count" id="count-flagged">—</span></button>
   </div>
 
   <table class="grid" id="grid" style="display:none;">
@@ -182,6 +228,29 @@ const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1);
 const fmtMin = n => n == null ? "—" : n >= 1 ? n.toFixed(1) + " min" : (n * 60).toFixed(0) + " sec";
 
 let lastTs = 0;
+let currentFilter = "all";
+const ATM_BAND = 500;  // dollars either side of spot for the ATM filter
+
+document.querySelectorAll(".filter-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentFilter = btn.dataset.filter;
+    refresh();
+  });
+});
+
+function strikeMatchesFilter(s, spot, threshold) {
+  if (currentFilter === "all") return true;
+  if (currentFilter === "itm") return s.strike < spot;
+  if (currentFilter === "otm") return s.strike >= spot;
+  if (currentFilter === "atm") return Math.abs(s.strike - spot) <= ATM_BAND;
+  if (currentFilter === "flagged") {
+    const a = actionFor(s, threshold);
+    return a.side !== "NONE";
+  }
+  return true;
+}
 
 function actionFor(s, threshold) {
   if (s.yes_ask != null) {
@@ -216,6 +285,7 @@ async function refresh() {
   }
   document.getElementById("status").style.display = "none";
   document.getElementById("grid").style.display = "";
+  document.getElementById("filters").style.display = "";
 
   const flashIf = (id, value, formatter) => {
     const el = document.getElementById(id);
@@ -238,11 +308,20 @@ async function refresh() {
   document.getElementById("age").textContent = ageSec < 60 ? ageSec.toFixed(0) + " sec ago" : (ageSec / 60).toFixed(1) + " min ago";
   document.body.classList.toggle("stale", ageSec > 90);
 
-  // Render rows. Highlight ATM band by spot proximity.
+  // Render rows. Highlight ATM band by spot proximity, apply filter.
   const tbody = document.getElementById("tbody");
   const out = [];
   const threshold = data.threshold_cents;
+  const counts = {all: 0, itm: 0, atm: 0, otm: 0, flagged: 0};
   for (const s of data.strikes) {
+    counts.all += 1;
+    if (s.strike < data.spot) counts.itm += 1;
+    if (s.strike >= data.spot) counts.otm += 1;
+    if (Math.abs(s.strike - data.spot) <= ATM_BAND) counts.atm += 1;
+    if (actionFor(s, threshold).side !== "NONE") counts.flagged += 1;
+
+    if (!strikeMatchesFilter(s, data.spot, threshold)) continue;
+
     const a = actionFor(s, threshold);
     const cls = classifyRow(s, threshold);
     const atm = Math.abs(s.strike - data.spot) < 250 ? "atm" : "";
@@ -264,6 +343,10 @@ async function refresh() {
     `);
   }
   tbody.innerHTML = out.join("");
+  for (const [k, v] of Object.entries(counts)) {
+    const el = document.getElementById("count-" + k);
+    if (el) el.textContent = v;
+  }
   lastTs = data.ts_ms;
 }
 
