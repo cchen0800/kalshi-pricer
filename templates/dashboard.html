@@ -180,6 +180,90 @@
     font-size: 11px;
     word-break: break-all;
   }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--rule);
+    background: var(--bg-2);
+    padding: 0 24px;
+  }
+  .tab {
+    background: transparent;
+    border: none;
+    color: var(--fg-dim);
+    padding: 12px 18px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active {
+    color: var(--fg);
+    border-bottom-color: var(--blue);
+    font-weight: 600;
+  }
+
+  /* Guide */
+  .guide {
+    max-width: 820px;
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--fg);
+    padding-bottom: 80px;
+  }
+  .guide h1 { font-size: 22px; margin: 4px 0 6px; font-weight: 600; }
+  .guide .lede { color: var(--fg-dim); margin: 0 0 24px; font-size: 14px; }
+  .guide h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--fg-dim); margin: 28px 0 10px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--rule);
+  }
+  .guide p { margin: 8px 0; }
+  .guide code {
+    background: var(--bg-3); padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  }
+  .guide pre {
+    background: var(--bg-3); padding: 12px 14px; border-radius: 4px;
+    overflow-x: auto; font-size: 12px; border: 1px solid var(--rule);
+    margin: 12px 0;
+  }
+  .guide pre code { background: none; padding: 0; }
+  .guide ul, .guide ol { padding-left: 22px; margin: 8px 0; }
+  .guide li { margin: 4px 0; }
+  .guide table {
+    border-collapse: collapse; width: 100%; margin: 12px 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .guide th, .guide td {
+    text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule);
+    font-size: 13px; vertical-align: top;
+  }
+  .guide th {
+    color: var(--fg-dim); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; font-weight: 500;
+    border-bottom-color: var(--fg-dim);
+  }
+  .guide strong { color: var(--fg); font-weight: 600; }
+  .guide .callout {
+    border-left: 3px solid var(--blue);
+    background: var(--bg-3);
+    padding: 10px 14px; margin: 14px 0; border-radius: 0 4px 4px 0;
+    color: var(--fg);
+  }
+  .guide .pill-demo { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: 11px; font-weight: 600; }
+  .guide .pill-demo.yes { color: var(--green); }
+  .guide .pill-demo.no  { color: var(--red); }
+  .guide kbd {
+    background: var(--bg-3); border: 1px solid var(--rule);
+    padding: 1px 6px; border-radius: 3px; font-family: ui-monospace, monospace;
+    font-size: 11px;
+  }
 </style>
 </head>
 <body>
@@ -194,7 +278,12 @@
   <div class="stat"><span class="label">Last poll</span><span class="value" id="age">—</span></div>
 </header>
 
-<main>
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="live">Live</button>
+  <button class="tab" data-tab="guide">Guide</button>
+</nav>
+
+<main id="tab-live">
   <div id="status" style="margin-bottom:12px; color:var(--fg-dim);">
     Waiting for first poll… (the engine runs every 30 s by default)
   </div>
@@ -237,6 +326,113 @@
   </div>
 </main>
 
+<main id="tab-guide" hidden>
+  <article class="guide">
+    <h1>How to use this dashboard</h1>
+    <p class="lede">A logger that prices every Kalshi BTC hourly strike under a zero-drift lognormal and shows you where the model and the market disagree. It does not place trades — you do that by hand on Kalshi if you decide an edge is real.</p>
+
+    <h2>What you're looking at</h2>
+    <p>Every 30 seconds the engine fetches the nearest open hourly event from Kalshi (e.g. <code>KXBTCD-26APR2723</code> = April 27, 2026 at 11pm EDT), pulls BTC spot + 60 1-min candles from Coinbase, computes annualized realized vol, prices each strike, and writes it all to <code>pricer.db</code>. The table you see is the latest poll, ascending by strike. The <strong>ATM band</strong> (strikes within $250 of spot) is bolded — that's where the action lives.</p>
+    <p>The <strong>header strip</strong> is your ground truth: pulse dot green = fresh data, yellow = poll older than 90 seconds (engine may be stuck). When the hour closes, the engine automatically rolls forward to the next hourly — you'll just see the event ticker change.</p>
+
+    <h2>Reading the columns</h2>
+    <table>
+      <thead><tr><th style="width:18%">Column</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>Strike</td><td><code>$76,100 or above</code> — BTC must close above this for YES to resolve YES. Match Kalshi's wording.</td></tr>
+        <tr><td>Chance</td><td>What the <strong>market</strong> thinks (mid of bid/ask, integer %). Same column Kalshi labels "Chance".</td></tr>
+        <tr><td>Model</td><td>What our <strong>lognormal model</strong> thinks. <em>This is the only column Kalshi doesn't have — the value-add of this tool.</em></td></tr>
+        <tr><td>Yes</td><td><span class="pill-demo yes">Yes 96¢</span> — what you'd pay to <strong>buy YES</strong> on Kalshi (= the YES ask).</td></tr>
+        <tr><td>No</td><td><span class="pill-demo no">No 5¢</span> — what you'd pay to <strong>buy NO</strong> (= 100 − YES bid). Equivalent to selling YES.</td></tr>
+        <tr><td>Edge</td><td>Model − Chance, in cents. Positive (green) = model thinks YES is cheap. Negative (red) = expensive.</td></tr>
+        <tr><td>Action</td><td><code>BUY_YES +6.2¢</code> / <code>SELL_YES +4.1¢</code> / <code>—</code>. Only fires when the lift-the-market edge exceeds the threshold (default 5¢).</td></tr>
+        <tr><td>Size</td><td>Bid size + ask size at the touch. Below ~100 means thin — you might lift one resting order with nothing behind.</td></tr>
+        <tr><td>Ticker</td><td>Full Kalshi market ticker. Copy and paste into Kalshi search to find the same market.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Filter buttons</h2>
+    <p>Above the grid, click to slice the view:</p>
+    <ul>
+      <li><strong>All</strong> — every strike in the event (~190 typically).</li>
+      <li><strong>ITM</strong> (strike &lt; spot) — YES is currently winning. Top of the ladder.</li>
+      <li><strong>ATM ±$500</strong> — strikes near spot. The action zone.</li>
+      <li><strong>OTM</strong> (strike ≥ spot) — YES is currently losing. Bottom of the ladder.</li>
+      <li><strong>Flagged only</strong> — rows where the lift edge exceeds threshold. <em>If this count is 0, there's nothing actionable right now.</em></li>
+    </ul>
+    <p>Counts on each button update with every poll, so you can see "5 flagged" without filtering.</p>
+
+    <h2>The intended workflow</h2>
+    <ol>
+      <li><strong>Open this page next to the Kalshi web app.</strong> Both show the same strikes — Kalshi has Strike + Chance + Yes/No, this dashboard adds Model + Edge + Action.</li>
+      <li><strong>Wait for the sweet spot: T-15 to T-3 minutes</strong> before close.
+        <ul>
+          <li>Earlier: prices haven't converged on the right strike, lognormal is noisy.</li>
+          <li>Later (T &lt; 3 min): Kalshi settles on a 60-second BRTI <em>average</em>, our pricer assumes a single terminal point — the model is wrong here, not the market.</li>
+        </ul>
+      </li>
+      <li><strong>Click "Flagged only".</strong> If the count is 0, no edge worth chasing. Move on.</li>
+      <li><strong>For a flagged row, sanity check before acting:</strong>
+        <ul>
+          <li>Is <strong>Size &gt; 100</strong>? Below that you might lift one order with nothing behind it.</li>
+          <li>Is the <strong>strike near spot</strong>? Tail strikes give bogus edges (model says 0.001%, market floor is 1¢ → "+0.5¢ edge" that isn't real).</li>
+          <li>Does the edge <strong>survive 2-3 polls</strong>? Auto-refresh is 2s. Persistent edges are more believable than bid/ask jitter.</li>
+          <li>Does the <strong>direction match a story</strong>? "Market thinks tails are fatter than lognormal" makes sense. "Market thinks ATM is biased upward" might just mean BTC is trending and our zero-drift model is off.</li>
+        </ul>
+      </li>
+      <li><strong>If you decide to act:</strong> copy the <strong>Ticker</strong> from the rightmost column → open Kalshi → paste into search → place the order by hand in the Kalshi UI. <em>This dashboard never trades for you.</em></li>
+    </ol>
+
+    <h2>Header strip — what each piece is for</h2>
+    <table>
+      <thead><tr><th>Field</th><th>What to do with it</th></tr></thead>
+      <tbody>
+        <tr><td>Event</td><td>Confirm you're looking at the right hour. Ticker format: <code>KXBTCD-YYMMMDDHH</code> in EDT.</td></tr>
+        <tr><td>BTC spot</td><td>Coinbase last trade. Eyeball reasonableness vs. the ATM strikes.</td></tr>
+        <tr><td>Realized σ</td><td>Annualized 60-min vol. If it's swinging fast (e.g. CPI just printed), <em>trust the model less</em>.</td></tr>
+        <tr><td>Time to close</td><td>How long until trading halts. After this, BRTI averaging starts.</td></tr>
+        <tr><td>Edge threshold</td><td>Default ±5¢. Edit <code>config.yaml</code> + restart to change.</td></tr>
+        <tr><td>Last poll</td><td>Age of the data. Yellow if &gt; 90s = engine may be stuck.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Pitfalls already burned into this design</h2>
+    <ul>
+      <li><strong>First 5 minutes after launch:</strong> realized σ uses the trailing 60 minutes; the most recent minute is partial. Don't trust early σ prints.</li>
+      <li><strong>The 60-second BRTI average:</strong> at T &lt; 3 min, the right model is "average of 60 correlated 1-second samples", not "terminal price". Edges this close are usually model-wrong.</li>
+      <li><strong>Coinbase ≠ BRTI:</strong> Kalshi settles on CF Benchmarks BRTI (basket across 6 exchanges). We use Coinbase as a proxy. Under stress they can drift several dollars. Treat sub-$10 BTC-denominated edges as basis noise.</li>
+      <li><strong>Tail strikes:</strong> deep ITM (model 99.9%) and deep OTM (model 0.1%) often show ±0.5¢ "edges" that are quote-floor artifacts. Look near spot.</li>
+      <li><strong>Bid/ask quote floor:</strong> Kalshi can't quote below 1¢, so 0.99/1.00 means "essentially certain to be YES" with 1¢ being mostly tick noise.</li>
+    </ul>
+
+    <h2>Common scenarios</h2>
+    <div class="callout">
+      <strong>Scenario: Flagged count = 0 for a long time.</strong><br/>
+      The market and model agree. Either the model is well-calibrated for this regime, or the threshold is too tight. Both are fine. Wait or lower the threshold in <code>config.yaml</code>.
+    </div>
+    <div class="callout">
+      <strong>Scenario: Symmetric bias near spot</strong> (e.g. all ITM strikes flag SELL_YES, all OTM flag BUY_YES).<br/>
+      The market is more confident than the model — usually because BTC is trending in one direction and our zero-drift assumption is off. <em>Be skeptical of these edges.</em>
+    </div>
+    <div class="callout">
+      <strong>Scenario: One strike flags, neighbors don't.</strong><br/>
+      That's a localized bid/ask anomaly — probably worth investigating. A single resting order or a pulled quote can cause it. Check Size before lifting.
+    </div>
+
+    <h2>What's intentionally not in scope</h2>
+    <ul>
+      <li>No order placement (read-only Kalshi client).</li>
+      <li>No CF Benchmarks subscription (Coinbase proxy only).</li>
+      <li>No drift / skew / IV blending — pure zero-drift lognormal.</li>
+      <li>No alerts (Slack, push, email). The dashboard is the alert.</li>
+    </ul>
+
+    <h2>Stopping & restarting</h2>
+    <p>Hit <kbd>Ctrl-C</kbd> in the terminal where you ran <code>python dashboard.py</code>. Both the HTTP server and the engine thread shut down cleanly. <code>pricer.db</code> persists — when you restart, the engine resumes appending to the same DB.</p>
+    <p>For headless logging without the UI: <code>python main.py</code>. Same engine, no port, just stdout.</p>
+  </article>
+</main>
+
 <script>
 const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
@@ -254,6 +450,17 @@ const noPill = bid => bid == null
 let lastTs = 0;
 let currentFilter = "all";
 const ATM_BAND = 500;  // dollars either side of spot for the ATM filter
+
+// Tabs
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    const target = tab.dataset.tab;
+    document.getElementById("tab-live").hidden = target !== "live";
+    document.getElementById("tab-guide").hidden = target !== "guide";
+  });
+});
 
 document.querySelectorAll(".filter-btn").forEach(btn => {
   btn.addEventListener("click", () => {
