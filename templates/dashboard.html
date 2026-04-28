@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>kalshi-pricer</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-2: #161b22;
+    --bg-3: #1c2230;
+    --fg: #e6edf3;
+    --fg-dim: #8b949e;
+    --rule: #30363d;
+    --green: #3fb950;
+    --green-dim: #1a3a25;
+    --red: #f85149;
+    --red-dim: #3d1d22;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--bg-2);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    align-items: baseline;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+  }
+  .stat .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    letter-spacing: 0.06em;
+  }
+  .stat .value {
+    font-size: 18px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat.flash { animation: flash 0.6s ease-out; }
+  @keyframes flash {
+    from { color: var(--blue); }
+    to   { color: var(--fg); }
+  }
+  main { padding: 16px 24px; }
+  .grid {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  .grid th, .grid td {
+    text-align: right;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .grid th {
+    color: var(--fg-dim);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-align: right;
+    border-bottom-color: var(--fg-dim);
+  }
+  .grid th:first-child, .grid td:first-child { text-align: left; }
+  .grid tr.buy  td { background: linear-gradient(90deg, transparent 0%, var(--green-dim) 100%); }
+  .grid tr.sell td { background: linear-gradient(90deg, transparent 0%, var(--red-dim)   100%); }
+  .grid tr.atm td { color: var(--fg); font-weight: 600; }
+  .grid tr.cold td { color: var(--fg-dim); }
+  .action.BUY_YES   { color: var(--green); font-weight: 600; }
+  .action.SELL_YES  { color: var(--red);   font-weight: 600; }
+  .action.NONE      { color: var(--fg-dim); }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .legend {
+    display: flex;
+    gap: 16px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  .swatch { display: inline-block; width: 10px; height: 10px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+  .swatch.buy  { background: var(--green); }
+  .swatch.sell { background: var(--red); }
+  .footer {
+    margin: 24px 0 12px;
+    color: var(--fg-dim);
+    font-size: 11px;
+  }
+  .pulse {
+    display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green);
+    margin-right: 6px;
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 0.4; }
+    50%     { opacity: 1; }
+  }
+  .stale .pulse { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+  .stale .stat .value { color: var(--yellow); }
+  .market-ticker {
+    color: var(--fg-dim);
+    font-size: 11px;
+    word-break: break-all;
+  }
+</style>
+</head>
+<body>
+
+<header id="header">
+  <h1><span class="pulse"></span> kalshi-pricer</h1>
+  <div class="stat"><span class="label">Event</span><span class="value" id="event">—</span></div>
+  <div class="stat"><span class="label">BTC spot (Coinbase)</span><span class="value" id="spot">—</span></div>
+  <div class="stat"><span class="label">Realized σ (60m, ann.)</span><span class="value" id="sigma">—</span></div>
+  <div class="stat"><span class="label">Time to close</span><span class="value" id="ttl">—</span></div>
+  <div class="stat"><span class="label">Edge threshold</span><span class="value" id="thresh">—</span></div>
+  <div class="stat"><span class="label">Last poll</span><span class="value" id="age">—</span></div>
+</header>
+
+<main>
+  <div id="status" style="margin-bottom:12px; color:var(--fg-dim);">
+    Waiting for first poll… (the engine runs every 30 s by default)
+  </div>
+
+  <table class="grid" id="grid" style="display:none;">
+    <thead>
+      <tr>
+        <th>Strike</th>
+        <th>Model %</th>
+        <th>Bid</th>
+        <th>Ask</th>
+        <th>Mid</th>
+        <th>Edge ¢</th>
+        <th>Action</th>
+        <th>Liquidity</th>
+        <th>Ticker</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="footer">
+    <div class="legend">
+      <span><span class="swatch buy"></span>model > ask + threshold → buy YES</span>
+      <span><span class="swatch sell"></span>model < bid − threshold → sell YES (buy NO)</span>
+    </div>
+    <div style="margin-top:6px;">
+      Settlement is CF Benchmarks BRTI; Coinbase used as proxy. Treat sub-$10
+      basis-equivalent edges with skepticism.
+    </div>
+  </div>
+</main>
+
+<script>
+const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
+const fmtPrice = n => n == null ? "—" : n.toFixed(3);
+const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1);
+const fmtMin = n => n == null ? "—" : n >= 1 ? n.toFixed(1) + " min" : (n * 60).toFixed(0) + " sec";
+
+let lastTs = 0;
+
+function actionFor(s, threshold) {
+  if (s.yes_ask != null) {
+    const buy = s.model_prob * 100 - s.yes_ask * 100;
+    const sell = s.yes_bid != null ? s.yes_bid * 100 - s.model_prob * 100 : -Infinity;
+    if (buy > threshold && buy >= sell) return {side: "BUY_YES", cents: buy};
+    if (sell > threshold)               return {side: "SELL_YES", cents: sell};
+  }
+  return {side: "NONE", cents: 0};
+}
+
+function classifyRow(s, threshold) {
+  const a = actionFor(s, threshold);
+  if (a.side === "BUY_YES")  return "buy";
+  if (a.side === "SELL_YES") return "sell";
+  return "";
+}
+
+async function refresh() {
+  let resp, data;
+  try {
+    resp = await fetch("/api/state", {cache: "no-store"});
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById("status").textContent = "Error fetching state: " + e;
+    return;
+  }
+  if (!data.ready) {
+    document.getElementById("status").textContent =
+      "Waiting for first poll… (it can take up to 30 s after start).";
+    return;
+  }
+  document.getElementById("status").style.display = "none";
+  document.getElementById("grid").style.display = "";
+
+  const flashIf = (id, value, formatter) => {
+    const el = document.getElementById(id);
+    const newText = formatter(value);
+    if (el.textContent !== newText) {
+      el.textContent = newText;
+      el.parentElement.classList.remove("flash");
+      void el.offsetWidth;
+      el.parentElement.classList.add("flash");
+    }
+  };
+
+  flashIf("event",  data.event_ticker, v => v);
+  flashIf("spot",   data.spot,         fmtMoney);
+  flashIf("sigma",  data.sigma,        fmtPct);
+  flashIf("ttl",    data.minutes_left, fmtMin);
+  document.getElementById("thresh").textContent = "±" + data.threshold_cents.toFixed(1) + "¢";
+
+  const ageSec = Math.max(0, (Date.now() - data.ts_ms) / 1000);
+  document.getElementById("age").textContent = ageSec < 60 ? ageSec.toFixed(0) + " sec ago" : (ageSec / 60).toFixed(1) + " min ago";
+  document.body.classList.toggle("stale", ageSec > 90);
+
+  // Render rows. Highlight ATM band by spot proximity.
+  const tbody = document.getElementById("tbody");
+  const out = [];
+  const threshold = data.threshold_cents;
+  for (const s of data.strikes) {
+    const a = actionFor(s, threshold);
+    const cls = classifyRow(s, threshold);
+    const atm = Math.abs(s.strike - data.spot) < 250 ? "atm" : "";
+    const cold = (s.yes_bid == null && s.yes_ask == null) ? "cold" : "";
+    const mid = (s.yes_bid != null && s.yes_ask != null) ? (s.yes_bid + s.yes_ask) / 2 : null;
+    const liq = (s.yes_bid_size || 0) + (s.yes_ask_size || 0);
+    out.push(`
+      <tr class="${[cls, atm, cold].filter(Boolean).join(" ")}">
+        <td>${fmtMoney(s.strike)}</td>
+        <td>${fmtPct(s.model_prob)}</td>
+        <td>${fmtPrice(s.yes_bid)}</td>
+        <td>${fmtPrice(s.yes_ask)}</td>
+        <td>${fmtPrice(mid)}</td>
+        <td class="${s.edge_cents > 0 ? 'pos' : s.edge_cents < 0 ? 'neg' : ''}">${fmtCents(s.edge_cents)}</td>
+        <td class="action ${a.side}">${a.side === "NONE" ? "—" : a.side + " +" + a.cents.toFixed(1) + "¢"}</td>
+        <td>${liq ? liq.toFixed(0) : "—"}</td>
+        <td class="market-ticker">${s.market_ticker}</td>
+      </tr>
+    `);
+  }
+  tbody.innerHTML = out.join("");
+  lastTs = data.ts_ms;
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+
+</body>
+</html>

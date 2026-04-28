@@ -1,0 +1,9 @@
+poll_interval_seconds: 30
+edge_threshold_cents: 5
+vol_window_minutes: 60
+log_level: INFO
+db_path: ./pricer.db
+series: KXBTCD
+kalshi_host: https://api.elections.kalshi.com
+coinbase_api_base: https://api.exchange.coinbase.com
+btc_product_id: BTC-USD
