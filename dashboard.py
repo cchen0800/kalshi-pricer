@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from main import load_config
+from src.btc_feed import CoinbaseFeed
 from src.engine import EngineConfig, run as run_engine
 
 ROOT = Path(__file__).parent
@@ -42,12 +43,14 @@ async def lifespan(app: FastAPI):
     stop = threading.Event()
     th = threading.Thread(target=_engine_thread_target, args=(cfg, stop), daemon=True)
     th.start()
-    _state["thread"], _state["stop"], _state["cfg"] = th, stop, cfg
+    feed = CoinbaseFeed()
+    _state["thread"], _state["stop"], _state["cfg"], _state["feed"] = th, stop, cfg, feed
     try:
         yield
     finally:
         stop.set()
         th.join(timeout=10)
+        feed.close()
 
 
 app = FastAPI(lifespan=lifespan, title="kalshi-pricer dashboard")
@@ -122,6 +125,22 @@ def api_history(market_ticker: str, limit: int = 120) -> JSONResponse:
             (market_ticker, limit),
         ).fetchall()
     return JSONResponse({"market_ticker": market_ticker, "rows": [dict(r) for r in rows[::-1]]})
+
+
+@app.get("/api/spot")
+def api_spot() -> JSONResponse:
+    """Live BTC spot from Coinbase, fetched fresh on every request.
+
+    Used by the dashboard header to tick faster than the 30s engine cadence.
+    """
+    feed: CoinbaseFeed | None = _state.get("feed")
+    if feed is None:
+        raise HTTPException(503, "feed not ready")
+    try:
+        s = feed.get_spot()
+    except Exception as e:
+        raise HTTPException(502, f"coinbase fetch failed: {e}")
+    return JSONResponse({"price": s.price, "bid": s.bid, "ask": s.ask, "ts_ms": s.epoch_ms})
 
 
 @app.get("/api/events")

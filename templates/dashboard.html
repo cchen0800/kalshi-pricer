@@ -316,8 +316,8 @@
 
   <div class="footer">
     <div class="legend">
-      <span><span class="swatch buy"></span>model > ask + threshold → buy YES</span>
-      <span><span class="swatch sell"></span>model < bid − threshold → sell YES (buy NO)</span>
+      <span><span class="swatch buy"></span>model > ask + threshold → Buy YES</span>
+      <span><span class="swatch sell"></span>model < bid − threshold → Buy NO</span>
     </div>
     <div style="margin-top:6px;">
       Settlement is CF Benchmarks BRTI; Coinbase used as proxy. Treat sub-$10
@@ -345,7 +345,7 @@
         <tr><td>Yes</td><td><span class="pill-demo yes">Yes 96¢</span> — what you'd pay to <strong>buy YES</strong> on Kalshi (= the YES ask).</td></tr>
         <tr><td>No</td><td><span class="pill-demo no">No 5¢</span> — what you'd pay to <strong>buy NO</strong> (= 100 − YES bid). Equivalent to selling YES.</td></tr>
         <tr><td>Edge</td><td>Model − Chance, in cents. Positive (green) = model thinks YES is cheap. Negative (red) = expensive.</td></tr>
-        <tr><td>Action</td><td><code>BUY_YES +6.2¢</code> / <code>SELL_YES +4.1¢</code> / <code>—</code>. Only fires when the lift-the-market edge exceeds the threshold (default 5¢).</td></tr>
+        <tr><td>Action</td><td><code>Buy YES +6.2¢</code> / <code>Buy NO +4.1¢</code> / <code>—</code>. Only fires when the lift-the-market edge exceeds the threshold (default 5¢). <em>"Buy NO" is mathematically identical to selling YES; we show it as a buy because that's the simplest click on Kalshi when you don't already hold YES contracts.</em></td></tr>
         <tr><td>Size</td><td>Bid size + ask size at the touch. Below ~100 means thin — you might lift one resting order with nothing behind.</td></tr>
         <tr><td>Ticker</td><td>Full Kalshi market ticker. Copy and paste into Kalshi search to find the same market.</td></tr>
       </tbody>
@@ -411,7 +411,7 @@
       The market and model agree. Either the model is well-calibrated for this regime, or the threshold is too tight. Both are fine. Wait or lower the threshold in <code>config.yaml</code>.
     </div>
     <div class="callout">
-      <strong>Scenario: Symmetric bias near spot</strong> (e.g. all ITM strikes flag SELL_YES, all OTM flag BUY_YES).<br/>
+      <strong>Scenario: Symmetric bias near spot</strong> (e.g. all ITM strikes flag Buy NO, all OTM flag Buy YES).<br/>
       The market is more confident than the model — usually because BTC is trending in one direction and our zero-drift assumption is off. <em>Be skeptical of these edges.</em>
     </div>
     <div class="callout">
@@ -438,7 +438,13 @@ const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {min
 const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
 const fmtPctInt = n => n == null ? "—" : Math.round(n * 100) + "%";
 const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1) + "¢";
-const fmtMin = n => n == null ? "—" : n >= 1 ? n.toFixed(1) + " min" : (n * 60).toFixed(0) + " sec";
+const fmtMin = n => {
+  if (n == null) return "—";
+  const totalSec = Math.max(0, Math.floor(n * 60));
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return mm + ":" + String(ss).padStart(2, "0");
+};
 const strikeLabel = strike => "$" + Math.ceil(strike).toLocaleString() + ' <span class="above">or above</span>';
 const yesPill = ask => ask == null
   ? '<span class="pill yes mute">Yes —</span>'
@@ -448,6 +454,7 @@ const noPill = bid => bid == null
   : '<span class="pill no">No ' + Math.round((1 - bid) * 100) + '¢</span>';
 
 let lastTs = 0;
+let closeTsMs = null;
 let currentFilter = "all";
 const ATM_BAND = 500;  // dollars either side of spot for the ATM filter
 
@@ -532,7 +539,8 @@ async function refresh() {
   flashIf("event",  data.event_ticker, v => v);
   flashIf("spot",   data.spot,         fmtMoney);
   flashIf("sigma",  data.sigma,        fmtPct);
-  flashIf("ttl",    data.minutes_left, fmtMin);
+  closeTsMs = data.ts_ms + data.minutes_left * 60000;
+  tickClose();
   document.getElementById("thresh").textContent = "±" + data.threshold_cents.toFixed(1) + "¢";
 
   const ageSec = Math.max(0, (Date.now() - data.ts_ms) / 1000);
@@ -567,7 +575,7 @@ async function refresh() {
         <td class="pill-cell">${yesPill(s.yes_ask)}</td>
         <td class="pill-cell">${noPill(s.yes_bid)}</td>
         <td class="${s.edge_cents > 0 ? 'pos' : s.edge_cents < 0 ? 'neg' : ''}">${fmtCents(s.edge_cents)}</td>
-        <td class="action ${a.side}">${a.side === "NONE" ? "—" : a.side + " +" + a.cents.toFixed(1) + "¢"}</td>
+        <td class="action ${a.side}">${a.side === "NONE" ? "—" : (a.side === "BUY_YES" ? "Buy YES" : "Buy NO") + " +" + a.cents.toFixed(1) + "¢"}</td>
         <td>${liq ? liq.toFixed(0) : "—"}</td>
         <td class="market-ticker">${s.market_ticker}</td>
       </tr>
@@ -581,8 +589,37 @@ async function refresh() {
   lastTs = data.ts_ms;
 }
 
+function tickClose() {
+  if (closeTsMs == null) return;
+  const remainingMin = (closeTsMs - Date.now()) / 60000;
+  const el = document.getElementById("ttl");
+  const newText = fmtMin(remainingMin);
+  if (el.textContent !== newText) el.textContent = newText;
+}
+
+async function refreshSpot() {
+  try {
+    const resp = await fetch("/api/spot", {cache: "no-store"});
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const el = document.getElementById("spot");
+    const newText = fmtMoney(data.price);
+    if (el.textContent !== newText) {
+      el.textContent = newText;
+      el.parentElement.classList.remove("flash");
+      void el.offsetWidth;
+      el.parentElement.classList.add("flash");
+    }
+  } catch (e) {
+    /* silent — next tick retries */
+  }
+}
+
 refresh();
+refreshSpot();
 setInterval(refresh, 2000);
+setInterval(refreshSpot, 1500);
+setInterval(tickClose, 1000);
 </script>
 
 </body>
