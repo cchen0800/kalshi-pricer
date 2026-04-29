@@ -335,6 +335,23 @@
     <p>Every 30 seconds the engine fetches the nearest open hourly event from Kalshi (e.g. <code>KXBTCD-26APR2723</code> = April 27, 2026 at 11pm EDT), pulls BTC spot + 60 1-min candles from Coinbase, computes annualized realized vol, prices each strike, and writes it all to <code>pricer.db</code>. The table you see is the latest poll, ascending by strike. The <strong>ATM band</strong> (strikes within $250 of spot) is bolded — that's where the action lives.</p>
     <p>The <strong>header strip</strong> is your ground truth: pulse dot green = fresh data, yellow = poll older than 90 seconds (engine may be stuck). When the hour closes, the engine automatically rolls forward to the next hourly — you'll just see the event ticker change.</p>
 
+    <h2>How the stats work</h2>
+    <p>The model uses a deliberately small set of inputs: <strong>spot</strong>, <strong>realized vol</strong>, and <strong>time to close</strong>. Every poll it takes Coinbase spot, looks at the last 60 one-minute closes, converts those into 1-minute <em>log returns</em>, measures their standard deviation, annualizes that into <strong>realized σ</strong>, and then prices each strike from those inputs.</p>
+    <p>In other words: this dashboard is not trying to predict where BTC <em>wants</em> to go. It is trying to estimate how much BTC could reasonably move before settlement if the next few minutes behave like the recent past.</p>
+    <ul>
+      <li><strong>Spot:</strong> the current Coinbase BTC price.</li>
+      <li><strong>Realized σ:</strong> the volatility implied by the last 60 one-minute closes, annualized for convenience.</li>
+      <li><strong>Minutes left:</strong> how much time remains until the Kalshi hourly market closes.</li>
+      <li><strong>Model %:</strong> the probability that BTC finishes above a given strike, using those three inputs.</li>
+    </ul>
+
+    <h2>What "zero-drift lognormal" means</h2>
+    <p><strong>Lognormal</strong> means we model future BTC moves in percentage terms rather than absolute dollars, and we keep price strictly positive. That is a standard short-horizon asset model because a $500 move means something different at $20k BTC than at $100k BTC.</p>
+    <p><strong>Zero drift</strong> means the model does <em>not</em> assume BTC is biased upward or downward over the next few minutes. It is intentionally neutral about direction. The model says, effectively, "I have a view on how noisy the path may be, but not on whether the next move is up or down."</p>
+    <p>One subtle point: zero drift does <em>not</em> mean "price is frozen" or "there is no movement." It only means there is no directional forecast baked in. Volatility still spreads out the possible outcomes, and that spread is what drives the strike probabilities.</p>
+    <p>The model formula includes a small negative-looking adjustment term inside the exponent. That is <em>not</em> a bearish view. It is the standard correction that keeps the expected future price centered on spot even when volatility is present. So in practical terms, zero drift here means: <strong>no trend call, only a volatility call</strong>.</p>
+    <p>We use this on purpose because it gives us a clean baseline. It is fast, easy to reason about, hard to overfit, and useful for spotting where the market is disagreeing with a simple "recent vol + no directional bet" distribution. When the market disagrees because BTC is genuinely trending, this model will be wrong — and that is exactly one of the main failure modes to watch for.</p>
+
     <h2>Reading the columns</h2>
     <table>
       <thead><tr><th style="width:18%">Column</th><th>Meaning</th></tr></thead>
