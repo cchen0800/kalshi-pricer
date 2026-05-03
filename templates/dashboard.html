@@ -209,6 +209,29 @@
     font-weight: 600;
   }
 
+  /* Trades tab */
+  .trades-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px 24px;
+    background: var(--bg-2);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 0 0 14px;
+  }
+  #trades-grid td.outcome-won { color: var(--green); font-weight: 600; }
+  #trades-grid td.outcome-lost { color: var(--red);   font-weight: 600; }
+  #trades-grid td.outcome-open { color: var(--fg-dim); }
+  #trades-grid td.pnl-pos { color: var(--green); font-weight: 600; }
+  #trades-grid td.pnl-neg { color: var(--red);   font-weight: 600; }
+  #trades-grid td.muted   { color: var(--fg-dim); }
+  #trades-grid .ticker-mini {
+    font-size: 10px;
+    color: var(--fg-dim);
+    word-break: break-all;
+  }
+
   /* Guide */
   .guide {
     max-width: 820px;
@@ -280,6 +303,7 @@
 
 <nav class="tabs" id="tabs">
   <button class="tab active" data-tab="live">Live</button>
+  <button class="tab" data-tab="trades">Trades</button>
   <button class="tab" data-tab="guide">Guide</button>
 </nav>
 
@@ -323,6 +347,53 @@
       Settlement is CF Benchmarks BRTI; Coinbase used as proxy. Treat sub-$10
       basis-equivalent edges with skepticism.
     </div>
+  </div>
+</main>
+
+<main id="tab-trades" hidden>
+  <div id="trades-summary" class="trades-summary">
+    <div class="stat"><span class="label">Orders placed</span><span class="value" id="t-total">—</span></div>
+    <div class="stat"><span class="label">Filled</span><span class="value" id="t-filled">—</span></div>
+    <div class="stat"><span class="label">Settled</span><span class="value" id="t-settled">—</span></div>
+    <div class="stat"><span class="label">Win rate</span><span class="value" id="t-winrate">—</span></div>
+    <div class="stat"><span class="label">Realized P&amp;L</span><span class="value" id="t-pnl">—</span></div>
+    <div class="stat"><span class="label">Open notional</span><span class="value" id="t-open">—</span></div>
+    <div class="stat"><span class="label">Fees paid</span><span class="value" id="t-fees">—</span></div>
+    <div class="stat"><span class="label">Cash</span><span class="value" id="t-cash">—</span></div>
+  </div>
+
+  <div class="filters" id="trade-filters">
+    <span class="label">Mode:</span>
+    <button class="filter-btn active" data-trade-mode="live">Live</button>
+    <button class="filter-btn" data-trade-mode="dry_run">Dry-run</button>
+  </div>
+
+  <table class="grid" id="trades-grid">
+    <thead>
+      <tr>
+        <th>When (ET)</th>
+        <th>Event</th>
+        <th>Strike</th>
+        <th>Side</th>
+        <th>×</th>
+        <th>Limit / Fill</th>
+        <th>Edge</th>
+        <th>Notional</th>
+        <th>Status</th>
+        <th>Outcome</th>
+        <th>P&amp;L</th>
+      </tr>
+    </thead>
+    <tbody id="trades-tbody">
+      <tr><td colspan="11" style="text-align:center; color:var(--fg-dim); padding:24px;">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <div class="footer" style="margin-top:16px;">
+    P&amp;L is per-market: if multiple of our orders touched the same market, the
+    settlement P&amp;L is the same on each row (it represents the aggregate cash
+    settlement, not a per-order attribution). "—" in the P&amp;L column means the
+    market hasn't settled yet.
   </div>
 </main>
 
@@ -481,8 +552,21 @@ document.querySelectorAll(".tab").forEach(tab => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
     const target = tab.dataset.tab;
-    document.getElementById("tab-live").hidden = target !== "live";
-    document.getElementById("tab-guide").hidden = target !== "guide";
+    document.getElementById("tab-live").hidden    = target !== "live";
+    document.getElementById("tab-trades").hidden  = target !== "trades";
+    document.getElementById("tab-guide").hidden   = target !== "guide";
+    if (target === "trades") refreshTrades();
+  });
+});
+
+// Trade-mode filter (live vs dry-run)
+let tradeMode = "live";
+document.querySelectorAll('[data-trade-mode]').forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll('[data-trade-mode]').forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    tradeMode = btn.dataset.tradeMode;
+    refreshTrades();
   });
 });
 
@@ -632,11 +716,128 @@ async function refreshSpot() {
   }
 }
 
+// ---- Trades tab ----
+const fmtSignedUsd = n => {
+  if (n == null) return "—";
+  const sign = n >= 0 ? "+" : "−";
+  return sign + "$" + Math.abs(n).toFixed(2);
+};
+const strikeFromTicker = mt => {
+  const last = (mt || "").split("-").pop() || "";
+  return last.startsWith("T") ? "$" + last.slice(1) : last;
+};
+const eventLabel = et => {
+  // KXBTCD-26MAY0222 → "May 02 22:00"
+  const m = (et || "").match(/^KXBTCD-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
+  if (!m) return et || "—";
+  return `${m[2]} ${m[3]} ${m[4]}:00`;
+};
+const fmtTimeEt = ts_ms => {
+  const d = new Date(ts_ms);
+  // Render in America/New_York; Intl handles DST.
+  const opts = { timeZone: "America/New_York", month: "2-digit", day: "2-digit",
+                 hour: "2-digit", minute: "2-digit", hour12: false };
+  return new Intl.DateTimeFormat("en-US", opts).format(d);
+};
+
+async function refreshTrades() {
+  let resp, data;
+  try {
+    resp = await fetch(`/api/trades?mode=${encodeURIComponent(tradeMode)}&limit=100`,
+                       {cache: "no-store"});
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById("trades-tbody").innerHTML =
+      `<tr><td colspan="11" style="text-align:center; color:var(--red); padding:24px;">Error: ${e}</td></tr>`;
+    return;
+  }
+  const s = data.summary || {};
+  const cash = s.cash_balance_cents == null ? null : s.cash_balance_cents / 100;
+  document.getElementById("t-total").textContent   = s.total_orders ?? "—";
+  document.getElementById("t-filled").textContent  = (s.filled ?? 0) + " / " + (s.total_orders ?? 0);
+  document.getElementById("t-settled").textContent = (s.settled_markets ?? 0) + " market" + ((s.settled_markets ?? 0) === 1 ? "" : "s");
+  document.getElementById("t-winrate").textContent =
+    s.win_rate == null ? `— (${s.won ?? 0}W / ${s.lost ?? 0}L)`
+                       : `${(s.win_rate * 100).toFixed(0)}% (${s.won}W / ${s.lost}L)`;
+  const pnlEl = document.getElementById("t-pnl");
+  pnlEl.textContent = fmtSignedUsd(s.realized_pnl_usd);
+  pnlEl.className = "value " + (s.realized_pnl_usd > 0 ? "pos" : s.realized_pnl_usd < 0 ? "neg" : "");
+  document.getElementById("t-open").textContent  = s.open_notional_usd == null ? "—" : "$" + s.open_notional_usd.toFixed(2);
+  document.getElementById("t-fees").textContent  = s.fees_paid_usd == null ? "—" : "$" + s.fees_paid_usd.toFixed(2);
+  document.getElementById("t-cash").textContent  = cash == null ? "—" : "$" + cash.toFixed(2);
+
+  const tbody = document.getElementById("trades-tbody");
+  const trades = data.trades || [];
+  if (!trades.length) {
+    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--fg-dim); padding:24px;">No ${tradeMode === "live" ? "live" : "dry-run"} orders yet.</td></tr>`;
+    return;
+  }
+  const rows = trades.map(t => {
+    const when = fmtTimeEt(t.ts_ms);
+    const ev = eventLabel(t.event_ticker);
+    const strike = strikeFromTicker(t.market_ticker);
+    const sideLabel = (t.action.toUpperCase() === "BUY" ? "Buy " : "Sell ") + t.side.toUpperCase();
+    const sideClass = t.side === "yes" && t.action === "buy" ? "action BUY_YES"
+                      : t.side === "yes" && t.action === "sell" ? "action SELL_YES" : "action";
+    let priceCell;
+    if (t.fill_price_cents != null) {
+      const lp = t.limit_price_cents;
+      const fp = t.fill_price_cents;
+      priceCell = `${lp}¢ / <strong>${fp}¢</strong>`;
+    } else {
+      priceCell = `${t.limit_price_cents}¢ / —`;
+    }
+    const edgeCls = t.edge_cents > 0 ? "pos" : t.edge_cents < 0 ? "neg" : "";
+    const edgeStr = (t.edge_cents >= 0 ? "+" : "") + t.edge_cents.toFixed(1) + "¢";
+    let outcomeCell, outcomeCls;
+    if (t.settled) {
+      const won = t.market_result === t.side;
+      outcomeCell = won ? "WON" : "LOST";
+      outcomeCls = won ? "outcome-won" : "outcome-lost";
+    } else if (t.status === "submitted") {
+      outcomeCell = t.fill_price_cents != null ? "open" : "resting";
+      outcomeCls = "outcome-open";
+    } else {
+      outcomeCell = t.status;
+      outcomeCls = "muted";
+    }
+    let pnlCell, pnlCls;
+    if (t.market_pnl_usd != null) {
+      pnlCell = fmtSignedUsd(t.market_pnl_usd);
+      pnlCls = t.market_pnl_usd > 0 ? "pnl-pos" : t.market_pnl_usd < 0 ? "pnl-neg" : "";
+    } else {
+      pnlCell = "—";
+      pnlCls = "muted";
+    }
+    return `
+      <tr>
+        <td>${when}</td>
+        <td>${ev}</td>
+        <td>${strike}<div class="ticker-mini">${t.market_ticker}</div></td>
+        <td class="${sideClass}">${sideLabel}</td>
+        <td>${t.count}</td>
+        <td>${priceCell}</td>
+        <td class="${edgeCls}">${edgeStr}</td>
+        <td>$${(t.notional_usd || 0).toFixed(2)}</td>
+        <td>${t.status}</td>
+        <td class="${outcomeCls}">${outcomeCell}</td>
+        <td class="${pnlCls}">${pnlCell}</td>
+      </tr>`;
+  });
+  tbody.innerHTML = rows.join("");
+}
+
 refresh();
 refreshSpot();
 setInterval(refresh, 2000);
 setInterval(refreshSpot, 1500);
 setInterval(tickClose, 1000);
+// Refresh trades data periodically when the tab is open. Cheap when hidden
+// because we only fetch on tab activation; this just keeps it fresh while
+// the user is looking at it.
+setInterval(() => {
+  if (!document.getElementById("tab-trades").hidden) refreshTrades();
+}, 15000);
 </script>
 
 </body>

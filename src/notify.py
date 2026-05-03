@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -85,6 +86,7 @@ class TelegramKillListener:
         token: str | None = None,
         chat_id: str | None = None,
         long_poll_seconds: int = 30,
+        command_handlers: dict[str, Callable[[], str]] | None = None,
     ) -> None:
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.chat_id = str(chat_id or os.environ.get("TELEGRAM_CHAT_ID") or "")
@@ -95,6 +97,11 @@ class TelegramKillListener:
         self._http: httpx.Client | None = None
         self._thread: threading.Thread | None = None
         self._offset = 0
+        # Optional read-side handlers (e.g. /pnl, /trades). Keys are command
+        # names without leading slash; values are zero-arg callables returning
+        # a Markdown reply string. Exceptions are caught so a buggy handler
+        # can't crash the listener.
+        self.command_handlers: dict[str, Callable[[], str]] = command_handlers or {}
 
     def start(self) -> None:
         if not self.enabled:
@@ -161,6 +168,18 @@ class TelegramKillListener:
             log.warning("ignoring command from foreign chat_id=%s", chat_id)
             return
         text = (msg.get("text") or "").strip().lower()
+
+        # Custom handlers first (so caller can override e.g. /status if desired).
+        cmd_key = text.lstrip("/")
+        if cmd_key in self.command_handlers:
+            try:
+                reply = self.command_handlers[cmd_key]()
+            except Exception as e:
+                log.exception("command handler %r failed", cmd_key)
+                reply = f"⚠️ `{cmd_key}` failed: {e}"
+            self._reply(reply)
+            return
+
         if text in ("/kill", "kill", "/stop", "stop", "halt", "/halt"):
             self.kill_file.touch()
             self._reply(
@@ -175,10 +194,13 @@ class TelegramKillListener:
                 f"file: `{self.kill_file}`"
             )
         elif text in ("/start", "/help", "help"):
+            extras = "\n".join(f"  /{k}" for k in sorted(self.command_handlers))
+            extras = ("\n" + extras) if extras else ""
             self._reply(
                 "commands:\n"
                 "  /kill   — halt new orders (touches .kill)\n"
-                "  /status — report kill-switch state\n"
+                "  /status — report kill-switch state"
+                f"{extras}\n"
                 "to resume after /kill: SSH in and `rm .kill`"
             )
 

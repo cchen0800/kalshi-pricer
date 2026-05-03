@@ -26,7 +26,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from main import load_config
 from src.btc_feed import CoinbaseFeed
+from src.db import open_db
 from src.engine import EngineConfig, event_close_utc, run as run_engine
+from src.trade_history import list_trades, summarize
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -59,31 +61,60 @@ def _engine_thread_target(cfg: EngineConfig, stop: threading.Event) -> None:
         logging.getLogger("dashboard").exception("engine thread crashed")
 
 
+def _try_init_trader():
+    """Best-effort KalshiTrader for the read-only Trades tab.
+
+    The dashboard never calls write methods. If creds aren't available
+    (e.g. running locally without keys), we just degrade — the tab will
+    show order intents from the DB but no fill/settlement enrichment.
+    """
+    try:
+        from src.kalshi_trader import KalshiTrader
+        return KalshiTrader()
+    except Exception as e:
+        import logging
+        logging.getLogger("dashboard").warning(
+            "KalshiTrader init failed; Trades tab will be DB-only: %s", e
+        )
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
     feed = CoinbaseFeed()
+    trader = _try_init_trader()
     no_engine = os.environ.get("DASHBOARD_NO_ENGINE") == "1"
     if no_engine:
         # Pure HTTP frontend. Some other process (typically trade.py) is
         # writing to the same DB; we just read.
-        _state["thread"], _state["stop"], _state["cfg"], _state["feed"] = None, None, cfg, feed
+        _state["thread"], _state["stop"], _state["cfg"], _state["feed"], _state["trader"] = (
+            None, None, cfg, feed, trader,
+        )
         try:
             yield
         finally:
             feed.close()
+            if trader is not None:
+                try: trader.close()
+                except Exception: pass
         return
 
     stop = threading.Event()
     th = threading.Thread(target=_engine_thread_target, args=(cfg, stop), daemon=True)
     th.start()
-    _state["thread"], _state["stop"], _state["cfg"], _state["feed"] = th, stop, cfg, feed
+    _state["thread"], _state["stop"], _state["cfg"], _state["feed"], _state["trader"] = (
+        th, stop, cfg, feed, trader,
+    )
     try:
         yield
     finally:
         stop.set()
         th.join(timeout=10)
         feed.close()
+        if trader is not None:
+            try: trader.close()
+            except Exception: pass
 
 
 app = FastAPI(lifespan=lifespan, title="kalshi-pricer dashboard")
@@ -175,6 +206,20 @@ def api_spot() -> JSONResponse:
     except Exception as e:
         raise HTTPException(502, f"coinbase fetch failed: {e}")
     return JSONResponse({"price": s.price, "bid": s.bid, "ask": s.ask, "ts_ms": s.epoch_ms})
+
+
+@app.get("/api/trades")
+def api_trades(limit: int = 50, mode: str = "live") -> JSONResponse:
+    """Trade history + aggregate P&L. Joins DB intents with Kalshi state.
+
+    Defaults to live trades; pass `mode=dry_run` to inspect dry-run intents.
+    """
+    cfg: EngineConfig = _state["cfg"]
+    trader = _state.get("trader")
+    with open_db(cfg.db_path) as db:
+        trades = list_trades(db, trader, mode=mode, limit=limit)
+        s = summarize(db, trader, mode=mode)
+    return JSONResponse({"trades": trades, "summary": s, "mode": mode})
 
 
 @app.get("/api/events")

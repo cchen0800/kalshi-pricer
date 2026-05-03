@@ -25,6 +25,7 @@ from src.engine import EngineConfig, run
 from src.executor import KILL_FILE
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramKillListener, TelegramNotifier
+from src.trade_history import format_pnl_telegram, format_trades_telegram
 
 from main import load_config
 
@@ -82,7 +83,20 @@ def main() -> int:
 
     trader: KalshiTrader | None = None
     notifier = TelegramNotifier()
-    kill_listener = TelegramKillListener(kill_file=KILL_FILE)
+    # Build read-side Telegram handlers. Each opens its own short-lived DB
+    # connection so it doesn't have to coordinate with the executor's writer.
+    def _pnl():
+        with open_db(cfg.db_path) as h_db:
+            return format_pnl_telegram(h_db, trader)
+
+    def _trades():
+        with open_db(cfg.db_path) as h_db:
+            return format_trades_telegram(h_db, trader, limit=8)
+
+    kill_listener = TelegramKillListener(
+        kill_file=KILL_FILE,
+        command_handlers={"pnl": _pnl, "trades": _trades},
+    )
     try:
         if args.live:
             trader = KalshiTrader()
