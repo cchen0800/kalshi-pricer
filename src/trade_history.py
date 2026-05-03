@@ -47,15 +47,46 @@ def _f(s: Any) -> float:
     return float(s)
 
 
-def _settlement_pnl_usd(s: dict) -> float:
-    """Realized $ P&L for a settled market record.
+def _order_pnl_usd(
+    order_fills: list[dict],
+    *,
+    side: str,
+    action: str,
+    settled: bool,
+    market_result: str | None,
+) -> float | None:
+    """Bot-only P&L for one order from its own fills + the market's outcome.
 
-    revenue is in cents; total_cost and fee_cost are dollar strings.
+    Critically, this does NOT use the aggregate /portfolio/settlements record.
+    `revenue` / `*_total_cost_dollars` / `fee_cost` on a settlement reflect
+    every fill on the account in that market, including any manual trades the
+    user placed by hand on Kalshi. Attributing those to a bot row would lump
+    the user's losses into the bot's P&L.
+
+    Returns None if the order didn't fill, the market hasn't settled, or the
+    side is a sell (sell P&L belongs to the originating buy's lifecycle).
     """
-    revenue_usd = _f(s.get("revenue", 0)) / 100.0
-    cost_usd = _f(s.get("yes_total_cost_dollars")) + _f(s.get("no_total_cost_dollars"))
-    fee_usd = _f(s.get("fee_cost"))
-    return revenue_usd - cost_usd - fee_usd
+    if not order_fills or not settled or action != "buy":
+        return None
+
+    total_count = 0.0
+    total_cost = 0.0
+    total_fees = 0.0
+    for f in order_fills:
+        cnt = _f(f.get("count_fp") or f.get("count"))
+        price = _f(
+            f.get("yes_price_dollars") if side == "yes" else f.get("no_price_dollars")
+        )
+        total_count += cnt
+        total_cost += cnt * price
+        total_fees += _f(f.get("fee_cost"))
+
+    if total_count == 0:
+        return None
+
+    won = (market_result == side)
+    revenue = total_count * 1.00 if won else 0.0
+    return revenue - total_cost - total_fees
 
 
 def _fetch_fills(trader, ticker: str | None = None, limit: int = 200) -> list[dict]:
@@ -170,9 +201,16 @@ def list_trades(
         sett = settlement_by_market.get(r["market_ticker"])
         settled = sett is not None
         market_result = sett.get("market_result") if sett else None
-        # Per-market P&L. If multiple of our orders touched the same market,
-        # they share this number (we surface that note in the UI).
-        market_pnl_usd = _settlement_pnl_usd(sett) if sett else None
+        # Bot-only P&L from this order's own fills. The settlement record
+        # is used for direction (won/lost) only, never for cash amounts —
+        # those would include the user's manual fills on the same market.
+        order_pnl_usd = _order_pnl_usd(
+            order_fills,
+            side=r["side"],
+            action=r["action"],
+            settled=settled,
+            market_result=market_result,
+        )
 
         out.append({
             "id": r["id"],
@@ -202,7 +240,7 @@ def list_trades(
             "is_taker": is_taker_any if order_fills else None,
             "settled": settled,
             "market_result": market_result,    # 'yes' | 'no' | None
-            "market_pnl_usd": market_pnl_usd,  # per-market, shared across orders
+            "order_pnl_usd": order_pnl_usd,    # bot-only, per-order from this order's fills
         })
     return out
 
@@ -213,33 +251,35 @@ def summarize(
     *,
     mode: str = "live",
 ) -> dict:
-    """Aggregate stats. Counts are per-order; realized P&L is per-market summed."""
+    """Aggregate stats. All values are bot-only — settlements on markets the
+    user also traded by hand are attributed to the bot only by what the bot's
+    own fills actually paid/received."""
     trades = list_trades(db, trader, mode=mode, limit=500)
     total = len(trades)
     submitted = sum(1 for t in trades if t["status"] == "submitted")
     filled = sum(1 for t in trades if t["fill_price_cents"] is not None)
 
-    # Realized P&L: sum settlements once per market, not once per order
-    seen_markets: set[str] = set()
+    # Realized P&L: per-order, from each order's own fills.
     realized_pnl_usd = 0.0
     won = 0
     lost = 0
+    settled_markets: set[str] = set()
     for t in trades:
         if not t["settled"]:
             continue
-        mt = t["market_ticker"]
-        if mt in seen_markets:
+        settled_markets.add(t["market_ticker"])
+        if t["order_pnl_usd"] is not None:
+            realized_pnl_usd += t["order_pnl_usd"]
+        # Win/loss tally is per-order — same market with multiple bot buys
+        # counts as multiple wins or losses depending on each fill's outcome.
+        if t["fill_price_cents"] is None:
             continue
-        seen_markets.add(mt)
-        pnl = t["market_pnl_usd"] or 0.0
-        realized_pnl_usd += pnl
-        # Did our side match the result?
         if t["market_result"] == t["side"]:
             won += 1
         else:
             lost += 1
 
-    open_count = total - len(seen_markets)
+    open_count = sum(1 for t in trades if not t["settled"] and t["status"] == "submitted")
     open_notional_usd = sum(
         t["notional_usd"] for t in trades
         if not t["settled"] and t["status"] == "submitted"
@@ -251,7 +291,7 @@ def summarize(
         "total_orders": total,
         "submitted": submitted,
         "filled": filled,
-        "settled_markets": len(seen_markets),
+        "settled_markets": len(settled_markets),
         "open_orders": open_count,
         "won": won,
         "lost": lost,
@@ -316,7 +356,7 @@ def format_trades_telegram(
         price_label = "fill" if t["fill_price_cents"] is not None else "limit"
         if t["settled"]:
             outcome = "WON" if t["market_result"] == t["side"] else "LOST"
-            pnl = _fmt_usd(t["market_pnl_usd"])
+            pnl = _fmt_usd(t["order_pnl_usd"])
             tail = f"→ {outcome} {pnl}"
         elif t["status"] == "submitted" and t["fill_price_cents"] is None:
             tail = "→ resting"
