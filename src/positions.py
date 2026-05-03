@@ -1,34 +1,46 @@
-"""Position + PnL accounting from the local DB.
+"""Bot-portfolio risk snapshot.
 
-Source of truth for *real* positions is Kalshi's portfolio API; we re-sync from
-there on demand. This module reads/writes the local mirror in pricer.db
-(`fills`, `settlements`, `intended_orders`) and computes:
+Source of truth for the live executor's risk caps. Joins:
 
-  - open notional: sum of |cash spent| on positions not yet settled
-  - realized PnL (today): sum of cash_delta over fills + settlements since
-    midnight ET
-  - count of open contracts per (market_ticker, side)
+  - DB `intended_orders` (mode='live', status='submitted') — bot's order ledger
+  - Kalshi `/portfolio/settlements`                       — settlement state + P&L
+
+Deliberately scoped to bot-originated trades. The user may manually trade other
+tickers (or even the same KXBTCD markets) on the same Kalshi account; those
+do NOT consume the bot's $30 budget.
+
+Fail-closed: if `trader` is set but the Kalshi call fails, `snapshot()` returns
+`None`. The caller (executor) MUST refuse to place new orders in that case —
+we'd rather miss a trade than open uncapped exposure.
 """
 
 from __future__ import annotations
 
+import logging
+import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
+log = logging.getLogger("positions")
 
 
 @dataclass
 class PositionSnapshot:
     open_notional_usd: float
-    realized_pnl_today_usd: float
-    open_contracts_by_market: dict[tuple[str, str], int]  # (market, side) -> net count
+    realized_pnl_today_usd: float                              # signed, +ve = profit
+    open_contracts_by_market: dict[tuple[str, str], int] = field(default_factory=dict)
 
     def total_loss_today_usd(self) -> float:
         """Positive number = how much we've lost today (realized only)."""
         return max(0.0, -self.realized_pnl_today_usd)
+
+    @classmethod
+    def empty(cls) -> "PositionSnapshot":
+        return cls(open_notional_usd=0.0, realized_pnl_today_usd=0.0)
 
 
 def _midnight_et_ms() -> int:
@@ -37,60 +49,80 @@ def _midnight_et_ms() -> int:
     return int(midnight_et.astimezone(timezone.utc).timestamp() * 1000)
 
 
-def snapshot(conn: sqlite3.Connection) -> PositionSnapshot:
+def _iso_to_ms(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    s = iso[:-1] + "+00:00" if iso.endswith("Z") else iso
+    try:
+        return int(datetime.fromisoformat(s).timestamp() * 1000)
+    except ValueError:
+        log.warning("can't parse iso time %r", iso)
+        return None
+
+
+def _f(x: Any) -> float:
+    if x is None or x == "":
+        return 0.0
+    return float(x)
+
+
+def snapshot(conn: sqlite3.Connection, trader: Any | None) -> PositionSnapshot | None:
+    """Return the bot's current risk snapshot, or None to signal fail-closed.
+
+    `trader=None` → empty snapshot (the dry-run path; nothing live to read).
+    `trader` set but Kalshi unreachable → None (live caller must refuse to trade).
+    """
+    if trader is None:
+        return PositionSnapshot.empty()
+
+    # Direct call (not via trade_history._fetch_settlements which swallows
+    # errors and returns []). Risk-critical paths must distinguish "no data"
+    # from "data unavailable" — the latter has to fail closed.
+    try:
+        data = trader._request("GET", "/portfolio/settlements", params={"limit": 200})
+        settlements = data.get("settlements", []) or []
+    except Exception:
+        log.exception("snapshot: settlements fetch failed; failing closed")
+        return None
+
+    sett_by_market: dict[str, dict] = {}
+    for s in settlements:
+        mt = s.get("ticker")
+        if mt:
+            sett_by_market[mt] = s
+
     midnight_ms = _midnight_et_ms()
-
-    # Net contracts per (market, side) from fills.
-    # buy adds to position, sell removes from it.
-    contracts: dict[tuple[str, str], int] = {}
-    open_notional = 0.0
-    for market, side, action, price_cents, count in conn.execute(
-        "SELECT market_ticker, side, action, fill_price_cents, count FROM fills"
-    ):
-        key = (market, side)
-        delta = count if action == "buy" else -count
-        contracts[key] = contracts.get(key, 0) + delta
-
-    # Open notional = sum over open positions of (|net contracts| * avg cost).
-    # Approximation: use most recent fill price as the cost basis. For our
-    # $30-budget purposes this is close enough — we'll cross-check against
-    # Kalshi's portfolio API in the executor.
-    last_price: dict[tuple[str, str], int] = {}
-    for market, side, price_cents in conn.execute(
-        "SELECT market_ticker, side, fill_price_cents FROM fills ORDER BY ts_ms"
-    ):
-        last_price[(market, side)] = price_cents
-    for key, net in contracts.items():
-        if net > 0 and key in last_price:
-            open_notional += (last_price[key] / 100.0) * net
-
-    # Settled markets no longer count as open notional, even if fills exist.
-    settled = {row[0] for row in conn.execute("SELECT market_ticker FROM portfolio_settlements")}
     open_by_market: dict[tuple[str, str], int] = {}
-    open_notional = 0.0
-    for key, net in contracts.items():
-        market, _ = key
-        if market in settled or net <= 0:
-            continue
-        open_by_market[key] = net
-        if key in last_price:
-            open_notional += (last_price[key] / 100.0) * net
+    open_notional_usd = 0.0
+    settled_pnl_by_market: dict[str, float] = {}
 
-    # Realized PnL today: sum of cash_delta from fills + settlements since midnight.
-    realized = 0.0
-    for (delta,) in conn.execute(
-        "SELECT cash_delta_usd FROM fills WHERE ts_ms >= ?", (midnight_ms,)
+    for market, side, action, count, limit_cents in conn.execute(
+        "SELECT market_ticker, side, action, count, limit_price_cents "
+        "FROM intended_orders WHERE mode='live' AND status='submitted'"
     ):
-        realized += delta
-    for (delta,) in conn.execute(
-        "SELECT cash_delta_usd FROM portfolio_settlements WHERE ts_ms >= ?", (midnight_ms,)
-    ):
-        realized += delta
+        sett = sett_by_market.get(market)
+        if sett is not None:
+            # Settled — exclude from open positions; record today's P&L once per market.
+            if market in settled_pnl_by_market:
+                continue
+            settled_ms = _iso_to_ms(sett.get("settled_time"))
+            if settled_ms is None or settled_ms < midnight_ms:
+                continue
+            revenue_usd = _f(sett.get("revenue", 0)) / 100.0
+            cost_usd = _f(sett.get("yes_total_cost_dollars")) + _f(sett.get("no_total_cost_dollars"))
+            fee_usd = _f(sett.get("fee_cost"))
+            settled_pnl_by_market[market] = revenue_usd - cost_usd - fee_usd
+            continue
+
+        key = (market, side)
+        signed_count = count if action == "buy" else -count
+        open_by_market[key] = open_by_market.get(key, 0) + signed_count
+        open_notional_usd += (limit_cents / 100.0) * signed_count
 
     return PositionSnapshot(
-        open_notional_usd=open_notional,
-        realized_pnl_today_usd=realized,
-        open_contracts_by_market=open_by_market,
+        open_notional_usd=max(0.0, open_notional_usd),
+        realized_pnl_today_usd=sum(settled_pnl_by_market.values()),
+        open_contracts_by_market={k: v for k, v in open_by_market.items() if v > 0},
     )
 
 
@@ -101,6 +133,5 @@ def kalshi_fee_cents(price_cents: int, count: int) -> int:
     where price is in dollars (0..1). Rounded up at the per-contract level.
     """
     p = price_cents / 100.0
-    per_contract = 0.07 * p * (1.0 - p) * 100.0  # in cents
-    import math
+    per_contract = 0.07 * p * (1.0 - p) * 100.0
     return math.ceil(per_contract) * count

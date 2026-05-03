@@ -103,8 +103,14 @@ class Executor:
         if len(self._order_times) >= MAX_ORDERS_PER_MINUTE:
             return Decision(False, "rate limit: >=4 orders in last 60s")
 
+        # Snapshot first — this is the source for every per-order risk check
+        # below. Fail-closed if we can't read it: in live mode we'd rather
+        # miss a trade than open uncapped exposure on stale state.
+        snap = snapshot(self.conn, self.trader)
+        if snap is None:
+            return Decision(False, "cannot read positions from Kalshi (fail-closed)")
+
         # Guard: daily loss
-        snap = snapshot(self.conn)
         if snap.total_loss_today_usd() >= MAX_DAILY_LOSS_USD:
             return Decision(
                 False,
