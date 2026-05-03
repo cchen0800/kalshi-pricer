@@ -203,6 +203,43 @@ def test_no_rows_above_threshold(db):
     assert d.placed is False
 
 
+def test_order_notification_escapes_markdown_specials(db, monkeypatch):
+    """Regression: previously the post-fill status 'submitted (order_id=...)'
+    contained an underscore that opened an unclosed Markdown italic, and the
+    Telegram API rejected every order alert with a 400. The notifier swallows
+    400s by design (must not block trading), so trades went unnotified.
+
+    Verify the message body contains no bare underscores or asterisks outside
+    the literal '*[LIVE] BUY YES*' bold markers."""
+    captured: list[str] = []
+
+    class FakeNotifier:
+        enabled = True
+        def send(self, text: str) -> None:
+            captured.append(text)
+
+    class FakeTrader:
+        def place_order(self, **kw):
+            return {"order_id": "fecc03f0-4efb-4787-a639_with_underscores"}
+
+    ex = Executor(db, trader=FakeTrader(), live=True, notifier=FakeNotifier())
+    stub_snapshot(monkeypatch, PositionSnapshot.empty() if hasattr(PositionSnapshot, "empty")
+                  else PositionSnapshot(0.0, 0.0))
+    row = make_row(market="KXBTCD-X-T1", model_prob=0.80, yes_ask=0.25, yes_bid=0.20)
+    d = ex.handle_poll([row])
+    assert d.placed is True
+    assert len(captured) == 1
+    msg = captured[0]
+    # The only allowed unescaped * are the two surrounding *[LIVE] BUY YES*.
+    # Strip those, then any remaining * is a bug.
+    body_after_bold = msg.split("*", 2)[-1]  # everything after the closing bold *
+    assert "*" not in body_after_bold
+    # Underscores must always be escaped. The order_id contained _with_ which
+    # would have crashed the parser; check it's escaped now.
+    assert "with_underscores" not in msg
+    assert "with\\_underscores" in msg
+
+
 def test_fail_closed_when_snapshot_unavailable(db, monkeypatch):
     """If snapshot() returns None (Kalshi unreachable in live mode), the
     executor must refuse to trade. This is the P0 fix — uncapped positions

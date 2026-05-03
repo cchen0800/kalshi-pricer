@@ -35,6 +35,18 @@ from src.positions import kalshi_fee_cents, snapshot
 
 log = logging.getLogger("executor")
 
+
+def _md_escape(s: str) -> str:
+    """Escape Markdown specials for Telegram's 'Markdown' parse mode.
+
+    A bare _, *, `, or [ in a body anywhere would either start a never-closed
+    entity (rejecting the whole message with a 400) or silently consume text
+    until the next matching char. Escape all four defensively.
+    """
+    for ch in ("_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
 # ---- HARDCODED GUARDS — DO NOT MOVE TO CONFIG ----
 MAX_NOTIONAL_USD = 30.0           # max $ tied up in open positions
 MAX_DAILY_LOSS_USD = 30.0         # realized loss kill-switch (today, ET)
@@ -267,8 +279,13 @@ class Executor:
     def _notify(self, ticket: OrderTicket, *, mode: str, status: str) -> None:
         if self.notifier is None or not self.notifier.enabled:
             return
-        # Telegram Markdown: use *bold*, escape underscores in tickers.
-        market = ticket.market_ticker.replace("_", r"\_")
+        # Telegram Markdown: any interpolated string that could contain _, *,
+        # `, or [ must be escaped or the whole message gets rejected with a 400.
+        # Previously only `market` was escaped; the `status` string contains
+        # "order_id=..." whose underscore opened an unclosed italic and silently
+        # killed every order alert.
+        market = _md_escape(ticket.market_ticker)
+        status_md = _md_escape(status)
         side_word = "BUY YES" if ticket.action == "buy" else "SELL YES"
         msg = (
             f"*[{mode}] {side_word}* {ticket.count} @ {ticket.limit_price_cents}¢\n"
@@ -276,7 +293,7 @@ class Executor:
             f"strike: ${ticket.spot:,.0f} spot ; T-{ticket.minutes_left:.1f}min\n"
             f"model: {ticket.model_prob*100:.1f}¢  edge: +{ticket.edge_cents:.1f}¢\n"
             f"notional: ${ticket.notional_usd:.2f}\n"
-            f"status: {status}"
+            f"status: {status_md}"
         )
         self.notifier.send(msg)
 
