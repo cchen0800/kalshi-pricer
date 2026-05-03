@@ -1,15 +1,25 @@
 # kalshi-pricer
 
-Logging-only auto-pricer + live dashboard for Kalshi BTC hourly markets
-(`KXBTCD`). Polls Kalshi + Coinbase, prices each strike with a zero-drift
-lognormal, logs every strike+poll to SQLite, and shows you where the model
-disagrees with the order book.
+Auto-pricer + live dashboard + (optional) auto-trader for Kalshi BTC hourly
+markets (`KXBTCD`). Polls Kalshi + Coinbase, prices each strike with a
+zero-drift lognormal, logs every strike+poll to SQLite, and shows you where
+the model disagrees with the order book.
 
-**No order placement.** The Kalshi client only exposes GET helpers and asserts
-the HTTP method is `GET` before any request goes out.
+There are **two modes**:
 
-**👉 For the workflow walk-through, read [GUIDE.md](GUIDE.md).** This README
-is just the technical reference.
+- **Logging-only** (the default for `dashboard.py` and `main.py`). The
+  Kalshi client used here exposes only GET helpers and hard-asserts the HTTP
+  method is `GET` before any request goes out — so it physically cannot
+  place orders.
+- **Auto-trade** (`trade.py`, opt-in). A separate POST-allowed client +
+  executor with hardcoded risk guards ($30 budget, 15¢ edge floor, etc.).
+  **👉 Read [TRADING.md](TRADING.md) before running this.**
+
+**Doc map:**
+- [GUIDE.md](GUIDE.md) — workflow walkthrough for the dashboard
+- [TRADING.md](TRADING.md) — full explanation of the trade decision logic
+  and every risk guard
+- This README — technical reference
 
 ## Settlement source caveat
 
@@ -53,6 +63,13 @@ python dashboard.py
 
 # Or, headless (engine only, no HTTP server):
 python main.py
+
+# Auto-trader (read TRADING.md first). Default is dry-run:
+python trade.py --dry-run
+# When ready to place real orders (requires confirmation):
+python trade.py --live
+# Kill switch — checked before each order:
+touch .kill
 ```
 
 Both commands poll every `poll_interval_seconds` (default 30s) and write every
@@ -102,20 +119,27 @@ python -m pytest tests/ -v
 kalshi-pricer/
   src/
     pricer.py          # zero-drift lognormal P(S_T > K)
-    kalshi_client.py   # RSA-PSS-SHA256 signed GETs only
+    kalshi_client.py   # RSA-PSS-SHA256 signed GETs only (read path)
+    kalshi_trader.py   # POST-allowed client (write path; auto-trader only)
     btc_feed.py        # Coinbase spot + 1m candles
     vol.py             # realized vol estimator
     db.py              # SQLite schema + writes
     engine.py          # main 30s poll loop
-  tests/               # pytest
+    executor.py        # guards + trade decisions (auto-trader only)
+    positions.py       # local position/PnL accounting (auto-trader only)
+    notify.py          # Telegram notifications (optional)
+  tests/               # pytest, including guard tests
   scripts/
-    verify_kalshi.py   # one-shot auth + market inspection
+    verify_kalshi.py    # one-shot auth + market inspection
+    telegram_setup.py   # one-shot chat-ID detector for Telegram
   templates/
     dashboard.html     # single-page UI, vanilla JS, auto-refresh
   config.yaml
-  .env                 # gitignored; KALSHI_KEY_ID + path to .pem
+  .env                 # gitignored; KALSHI_KEY_ID + .pem path + Telegram creds
   .secrets/            # gitignored; the .pem lives here, chmod 600
-  main.py              # headless engine entrypoint
-  dashboard.py         # FastAPI + engine-in-thread entrypoint
-  GUIDE.md             # workflow walkthrough
+  main.py              # headless engine entrypoint (logging-only)
+  dashboard.py         # FastAPI + engine-in-thread entrypoint (logging-only)
+  trade.py             # auto-trader entrypoint (--dry-run / --live)
+  GUIDE.md             # dashboard workflow walkthrough
+  TRADING.md           # auto-trader doc: decision logic, every guard, risk
 ```

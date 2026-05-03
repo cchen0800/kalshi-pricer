@@ -30,6 +30,58 @@ CREATE TABLE IF NOT EXISTS polls (
 CREATE INDEX IF NOT EXISTS idx_polls_market_ts ON polls(market_ticker, ts_ms);
 CREATE INDEX IF NOT EXISTS idx_polls_event_ts  ON polls(event_ticker, ts_ms);
 CREATE INDEX IF NOT EXISTS idx_polls_ts        ON polls(ts_ms);
+
+CREATE TABLE IF NOT EXISTS intended_orders (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms               INTEGER NOT NULL,
+    mode                TEXT    NOT NULL,            -- 'dry_run' | 'live'
+    event_ticker        TEXT    NOT NULL,
+    market_ticker       TEXT    NOT NULL,
+    side                TEXT    NOT NULL,            -- 'yes' | 'no'
+    action              TEXT    NOT NULL,            -- 'buy' | 'sell'
+    limit_price_cents   INTEGER NOT NULL,            -- 1..99
+    count               INTEGER NOT NULL,
+    notional_usd        REAL    NOT NULL,
+    model_prob          REAL    NOT NULL,
+    edge_cents          REAL    NOT NULL,
+    minutes_left        REAL    NOT NULL,
+    spot                REAL    NOT NULL,
+    client_order_id     TEXT    NOT NULL UNIQUE,
+    status              TEXT    NOT NULL,            -- 'dry_run' | 'submitted' | 'rejected' | 'error'
+    reject_reason       TEXT,
+    kalshi_order_id     TEXT,
+    raw_response        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_intended_ts     ON intended_orders(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_intended_market ON intended_orders(market_ticker, ts_ms);
+
+CREATE TABLE IF NOT EXISTS fills (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms               INTEGER NOT NULL,
+    intended_order_id   INTEGER,                     -- FK into intended_orders
+    market_ticker       TEXT    NOT NULL,
+    side                TEXT    NOT NULL,
+    action              TEXT    NOT NULL,
+    fill_price_cents    INTEGER NOT NULL,
+    count               INTEGER NOT NULL,
+    fee_usd             REAL    NOT NULL DEFAULT 0,
+    cash_delta_usd      REAL    NOT NULL,            -- signed: negative = paid, positive = received
+    kalshi_trade_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fills_ts     ON fills(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_fills_market ON fills(market_ticker, ts_ms);
+
+-- Note: a `settlements` table already exists in pricer.db for historical BTC
+-- OHLC settlement prices (different schema, different purpose). We use a
+-- distinct name here to avoid collision.
+CREATE TABLE IF NOT EXISTS portfolio_settlements (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms               INTEGER NOT NULL,
+    market_ticker       TEXT    NOT NULL UNIQUE,
+    settled_yes         INTEGER NOT NULL,            -- 1 if YES paid out, 0 if NO paid out
+    cash_delta_usd      REAL    NOT NULL,            -- payout to our account from settlement
+    raw_response        TEXT
+);
 """
 
 

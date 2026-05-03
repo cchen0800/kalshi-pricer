@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from src.btc_feed import CoinbaseFeed, closes
@@ -145,6 +145,7 @@ def run_one_poll(
     feed: CoinbaseFeed,
     cfg: EngineConfig,
     db,
+    on_poll: Callable[[list[PollRow]], None] | None = None,
 ) -> None:
     found = find_nearest_open_event(kc, cfg.series)
     if found is None:
@@ -192,8 +193,18 @@ def run_one_poll(
             f"bid={bid} ask={ask}  → {side} +{cents:.1f}¢"
         )
 
+    if on_poll is not None:
+        try:
+            on_poll(rows)
+        except Exception:
+            log.exception("on_poll hook failed; continuing")
 
-def run(cfg: EngineConfig, stop_event: threading.Event | None = None) -> None:
+
+def run(
+    cfg: EngineConfig,
+    stop_event: threading.Event | None = None,
+    on_poll: Callable[[list[PollRow]], None] | None = None,
+) -> None:
     """Run the polling loop.
 
     If `stop_event` is supplied (e.g. from a dashboard host running this in a
@@ -210,7 +221,7 @@ def run(cfg: EngineConfig, stop_event: threading.Event | None = None) -> None:
                 return
             t0 = time.time()
             try:
-                run_one_poll(kc=kc, feed=feed, cfg=cfg, db=db)
+                run_one_poll(kc=kc, feed=feed, cfg=cfg, db=db, on_poll=on_poll)
             except KeyboardInterrupt:
                 log.info("interrupted, exiting")
                 return
