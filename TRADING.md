@@ -162,6 +162,21 @@ python scripts/telegram_setup.py
 If Telegram is unreachable or the env vars are missing, notifications are a
 silent no-op — they will **never** block trading.
 
+### Remote kill switch from Telegram
+
+When `trade.py` starts, it also launches a background thread that listens for
+commands from your configured chat:
+
+| Command | Effect |
+|---|---|
+| `/kill` (or `kill`, `/stop`, `halt`) | Touches `.kill` — executor refuses next order. Bot replies with confirmation. |
+| `/status` | Reports whether the kill switch is currently armed. |
+| `/help` | Lists the available commands. |
+
+Messages from any other chat are ignored (only the chat ID in `.env` can
+control the trader). To resume after `/kill`, you must SSH in and
+`rm .kill` — by design, the asymmetry is "easy to halt, hard to resume."
+
 ---
 
 ## Mode reference

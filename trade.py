@@ -22,8 +22,9 @@ from src.executor import (
     Executor,
 )
 from src.engine import EngineConfig, run
+from src.executor import KILL_FILE
 from src.kalshi_trader import KalshiTrader
-from src.notify import TelegramNotifier
+from src.notify import TelegramKillListener, TelegramNotifier
 
 from main import load_config
 
@@ -81,11 +82,14 @@ def main() -> int:
 
     trader: KalshiTrader | None = None
     notifier = TelegramNotifier()
+    kill_listener = TelegramKillListener(kill_file=KILL_FILE)
     try:
         if args.live:
             trader = KalshiTrader()
             bal = trader.get_balance()
             log.info("kalshi balance: %s", bal)
+
+        kill_listener.start()
 
         with open_db(cfg.db_path) as db:
             executor = Executor(db, trader, live=args.live, notifier=notifier)
@@ -99,6 +103,7 @@ def main() -> int:
 
             run(cfg, on_poll=on_poll)
     finally:
+        kill_listener.stop()
         if trader is not None:
             trader.close()
         notifier.close()
