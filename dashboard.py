@@ -3,13 +3,17 @@ HTML page and JSON endpoints reading from the same SQLite file the engine
 writes to.
 
 Launch:
-    python dashboard.py        # http://localhost:8000
+    python dashboard.py                    # http://localhost:8000, owns its own engine
+    python dashboard.py --no-engine        # HTTP only — read DB written by trade.py
+    python dashboard.py --port 5051        # bind a different port (e.g. behind Caddy)
 
 Read-only. The engine inside is the same read-only one as `python main.py`.
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
@@ -58,10 +62,21 @@ def _engine_thread_target(cfg: EngineConfig, stop: threading.Event) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
+    feed = CoinbaseFeed()
+    no_engine = os.environ.get("DASHBOARD_NO_ENGINE") == "1"
+    if no_engine:
+        # Pure HTTP frontend. Some other process (typically trade.py) is
+        # writing to the same DB; we just read.
+        _state["thread"], _state["stop"], _state["cfg"], _state["feed"] = None, None, cfg, feed
+        try:
+            yield
+        finally:
+            feed.close()
+        return
+
     stop = threading.Event()
     th = threading.Thread(target=_engine_thread_target, args=(cfg, stop), daemon=True)
     th.start()
-    feed = CoinbaseFeed()
     _state["thread"], _state["stop"], _state["cfg"], _state["feed"] = th, stop, cfg, feed
     try:
         yield
@@ -177,4 +192,16 @@ def api_events() -> JSONResponse:
 
 
 if __name__ == "__main__":
-    uvicorn.run("dashboard:app", host="127.0.0.1", port=8000, log_level="info")
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", default=os.environ.get("DASHBOARD_HOST", "127.0.0.1"))
+    p.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", "8000")))
+    p.add_argument(
+        "--no-engine",
+        action="store_true",
+        help="Don't spawn the polling engine; act as pure HTTP over the DB. "
+             "Use when trade.py is already running and writing polls.",
+    )
+    args = p.parse_args()
+    if args.no_engine:
+        os.environ["DASHBOARD_NO_ENGINE"] = "1"
+    uvicorn.run("dashboard:app", host=args.host, port=args.port, log_level="info")
