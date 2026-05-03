@@ -14,11 +14,15 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
-from src.btc_feed import CoinbaseFeed, closes
+from src.btc_feed import CoinbaseFeed, closes, ohlc
 from src.db import PollRow, insert_polls, open_db
 from src.kalshi_client import KalshiClient
-from src.pricer import edge_cents, prob_above_strike
-from src.vol import annualized_vol
+from src.positions import kalshi_fee_cents
+from src.pricer import edge_cents, prob_above_strike, prob_above_strike_path_dependent
+from src.realized import RealizedAverager
+from src.vol import annualized_vol, yang_zhang_vol
+
+BRTI_AVERAGING_WINDOW_SECONDS = 60.0  # Kalshi BRTI averages over the final 60s before close.
 
 log = logging.getLogger("engine")
 
@@ -31,10 +35,15 @@ TICKER_RE = re.compile(r"^KXBTCD-(\d{2})([A-Z]{3})(\d{2})(\d{2})$")
 @dataclass
 class EngineConfig:
     poll_interval_seconds: int = 30
+    fast_poll_interval_seconds: int = 3   # used when seconds_to_settlement < FAST_POLL_THRESHOLD_S
     edge_threshold_cents: float = 5.0
     vol_window_minutes: int = 60
     db_path: str = "./pricer.db"
     series: str = "KXBTCD"
+    vol_estimator: str = "yang_zhang"  # 'yang_zhang' | 'close'
+
+
+FAST_POLL_THRESHOLD_S = 90.0  # switch to fast cadence inside the last 90s of an event
 
 
 def event_close_utc(event_ticker: str) -> datetime | None:
@@ -82,8 +91,11 @@ def build_poll_rows(
     markets: Iterable[dict],
     spot: float,
     sigma: float,
-    minutes_left: float,
+    seconds_to_settlement: float,
+    realized_partial_avg: float | None = None,
+    averaging_window_seconds: float = BRTI_AVERAGING_WINDOW_SECONDS,
 ) -> list[PollRow]:
+    minutes_left = seconds_to_settlement / 60.0
     rows: list[PollRow] = []
     for m in markets:
         strike = _f(m.get("floor_strike"))
@@ -95,7 +107,14 @@ def build_poll_rows(
         ask_size = _f(m.get("yes_ask_size_fp"))
         volume = _f(m.get("volume_fp"))
 
-        model_prob = prob_above_strike(spot, strike, sigma, minutes_left)
+        model_prob = prob_above_strike_path_dependent(
+            spot=spot,
+            strike=strike,
+            sigma=sigma,
+            seconds_to_settlement=seconds_to_settlement,
+            realized_partial_avg=realized_partial_avg,
+            averaging_window_seconds=averaging_window_seconds,
+        )
         # Signed edge vs. mid (positive = model > mid, suggests buy YES).
         if yes_bid is not None and yes_ask is not None:
             mid_cents = (yes_bid + yes_ask) * 50.0
@@ -123,13 +142,22 @@ def build_poll_rows(
 
 
 def actionable_edge(row: PollRow) -> tuple[str, float]:
-    """Return (side, cents) of best lift-the-market edge. side ∈ {'BUY_YES','SELL_YES','NONE'}."""
+    """Return (side, cents) of best lift-the-market edge, NET of Kalshi taker fee.
+
+    side ∈ {'BUY_YES','SELL_YES','NONE'}. Returned `cents` is what we'd actually
+    pocket per contract after the exchange fee — at price=50¢ the fee is ~2¢,
+    near 0¢/100¢ it's ~0¢, so 50/50 contracts must clear a higher gross edge.
+    """
     if row.yes_ask is not None:
-        buy = row.model_prob * 100.0 - row.yes_ask * 100.0
+        ask_cents = int(round(row.yes_ask * 100))
+        fee = kalshi_fee_cents(max(1, min(99, ask_cents)), 1)
+        buy = row.model_prob * 100.0 - row.yes_ask * 100.0 - fee
     else:
         buy = float("-inf")
     if row.yes_bid is not None:
-        sell = row.yes_bid * 100.0 - row.model_prob * 100.0
+        bid_cents = int(round(row.yes_bid * 100))
+        fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
+        sell = row.yes_bid * 100.0 - row.model_prob * 100.0 - fee
     else:
         sell = float("-inf")
     if buy >= sell and buy > 0:
@@ -146,23 +174,48 @@ def run_one_poll(
     cfg: EngineConfig,
     db,
     on_poll: Callable[[list[PollRow]], None] | None = None,
-) -> None:
+    averagers: dict[str, RealizedAverager] | None = None,
+) -> float | None:
+    """Run one poll cycle. Returns seconds_to_settlement of the active event,
+    or None if no open event was found. The outer loop uses this to switch
+    between normal and fast-poll cadence near expiry."""
     found = find_nearest_open_event(kc, cfg.series)
     if found is None:
         log.warning("no open hourly event found")
-        return
+        return None
     event_ticker, close_utc = found
-    minutes_left = max(0.0, (close_utc - datetime.now(timezone.utc)).total_seconds() / 60.0)
-    if minutes_left <= 0:
+    now = datetime.now(timezone.utc)
+    seconds_to_settlement = max(0.0, (close_utc - now).total_seconds())
+    minutes_left = seconds_to_settlement / 60.0
+    if seconds_to_settlement <= 0:
         log.info("event %s already closed", event_ticker)
-        return
+        return seconds_to_settlement
 
     spot_obj = feed.get_spot()
     candles = feed.get_1m_candles(cfg.vol_window_minutes)
     if len(candles) < 2:
         log.warning("not enough candles to compute vol (%d)", len(candles))
-        return
-    sigma = annualized_vol(closes(candles))
+        return seconds_to_settlement
+    if cfg.vol_estimator == "yang_zhang":
+        sigma = yang_zhang_vol(ohlc(candles))
+    elif cfg.vol_estimator == "close":
+        sigma = annualized_vol(closes(candles))
+    else:
+        raise ValueError(f"unknown vol_estimator: {cfg.vol_estimator!r}")
+
+    # Maintain a per-event spot buffer so we can compute the realized portion of
+    # the BRTI averaging window. When we're inside the final 60s, this becomes
+    # the "locked in" component of the settlement value.
+    realized_partial_avg: float | None = None
+    if averagers is not None:
+        avg = averagers.setdefault(event_ticker, RealizedAverager())
+        avg.add(spot_obj.epoch_ms / 1000.0, spot_obj.price)
+        if seconds_to_settlement < BRTI_AVERAGING_WINDOW_SECONDS:
+            close_s = close_utc.timestamp()
+            realized_partial_avg = avg.average(
+                window_start_s=close_s - BRTI_AVERAGING_WINDOW_SECONDS,
+                window_end_s=min(close_s, now.timestamp()),
+            )
 
     markets = kc.list_markets(event_ticker=event_ticker, limit=500).get("markets", [])
     ts_ms = int(time.time() * 1000)
@@ -172,17 +225,21 @@ def run_one_poll(
         markets=markets,
         spot=spot_obj.price,
         sigma=sigma,
-        minutes_left=minutes_left,
+        seconds_to_settlement=seconds_to_settlement,
+        realized_partial_avg=realized_partial_avg,
     )
     n = insert_polls(db, rows)
 
     flagged = [r for r in rows if abs(actionable_edge(r)[1]) > cfg.edge_threshold_cents]
     flagged.sort(key=lambda r: -abs(actionable_edge(r)[1]))
 
+    realized_tag = (
+        f"  realized=${realized_partial_avg:,.2f}" if realized_partial_avg is not None else ""
+    )
     print(
         f"[{datetime.now().strftime('%H:%M:%S')}] "
         f"{event_ticker}  spot=${spot_obj.price:,.2f}  σ={sigma:.1%}  "
-        f"T-{minutes_left:5.1f}min  rows={n}  flagged={len(flagged)}"
+        f"T-{minutes_left:5.1f}min  rows={n}  flagged={len(flagged)}{realized_tag}"
     )
     for r in flagged[:8]:
         side, cents = actionable_edge(r)
@@ -199,6 +256,8 @@ def run_one_poll(
         except Exception:
             log.exception("on_poll hook failed; continuing")
 
+    return seconds_to_settlement
+
 
 def run(
     cfg: EngineConfig,
@@ -212,6 +271,7 @@ def run(
     runs until KeyboardInterrupt.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    averagers: dict[str, RealizedAverager] = {}
     with KalshiClient() as kc, CoinbaseFeed() as feed, open_db(cfg.db_path) as db:
         log.info("engine started — db=%s poll=%ds threshold=%.1f¢",
                  cfg.db_path, cfg.poll_interval_seconds, cfg.edge_threshold_cents)
@@ -220,15 +280,28 @@ def run(
                 log.info("stop event set, exiting")
                 return
             t0 = time.time()
+            seconds_to_settlement: float | None = None
             try:
-                run_one_poll(kc=kc, feed=feed, cfg=cfg, db=db, on_poll=on_poll)
+                seconds_to_settlement = run_one_poll(
+                    kc=kc, feed=feed, cfg=cfg, db=db,
+                    on_poll=on_poll, averagers=averagers,
+                )
             except KeyboardInterrupt:
                 log.info("interrupted, exiting")
                 return
             except Exception:
                 log.exception("poll failed; will retry next interval")
             elapsed = time.time() - t0
-            remaining = max(0.0, cfg.poll_interval_seconds - elapsed)
+            # Switch to fast cadence inside the BRTI averaging window neighborhood
+            # so the RealizedAverager actually has samples to work with.
+            if (
+                seconds_to_settlement is not None
+                and 0 < seconds_to_settlement < FAST_POLL_THRESHOLD_S
+            ):
+                interval = cfg.fast_poll_interval_seconds
+            else:
+                interval = cfg.poll_interval_seconds
+            remaining = max(0.0, interval - elapsed)
             # Sleep in small increments so stop_event is responsive.
             if stop_event is not None:
                 deadline = time.time() + remaining

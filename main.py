@@ -17,10 +17,12 @@ def load_config() -> EngineConfig:
     raw = yaml.safe_load(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
     return EngineConfig(
         poll_interval_seconds=int(raw.get("poll_interval_seconds", 30)),
+        fast_poll_interval_seconds=int(raw.get("fast_poll_interval_seconds", 3)),
         edge_threshold_cents=float(raw.get("edge_threshold_cents", 5.0)),
         vol_window_minutes=int(raw.get("vol_window_minutes", 60)),
         db_path=str(raw.get("db_path", "./pricer.db")),
         series=str(raw.get("series", "KXBTCD")),
+        vol_estimator=str(raw.get("vol_estimator", "yang_zhang")),
     )
 
 

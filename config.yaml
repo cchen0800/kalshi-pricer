@@ -1,6 +1,8 @@
 poll_interval_seconds: 30
+fast_poll_interval_seconds: 3   # used inside the final 90s of an event (feeds RealizedAverager)
 edge_threshold_cents: 5
 vol_window_minutes: 60
+vol_estimator: yang_zhang  # 'yang_zhang' (range-based) | 'close' (legacy close-to-close)
 log_level: INFO
 db_path: ./pricer.db
 series: KXBTCD

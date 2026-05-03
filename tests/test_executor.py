@@ -93,7 +93,7 @@ def test_dry_run_records_intent_no_post(db):
 
 def test_min_edge_floor_blocks_small_edges(db):
     ex = Executor(db, trader=None, live=False)
-    # 5c edge — below MIN_EDGE_CENTS (15c).
+    # Gross 5c, net ~3c after 2c fee — below MIN_EDGE_CENTS (8c, net).
     row = make_row(model_prob=0.30, yes_ask=0.25, yes_bid=0.20)
     d = ex.handle_poll([row])
     assert d.placed is False

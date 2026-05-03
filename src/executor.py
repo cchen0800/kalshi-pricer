@@ -31,7 +31,7 @@ from src.db import PollRow
 from src.engine import actionable_edge
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramNotifier
-from src.positions import kalshi_fee_cents, snapshot
+from src.positions import snapshot
 
 log = logging.getLogger("executor")
 
@@ -52,9 +52,15 @@ MAX_NOTIONAL_USD = 30.0           # max $ tied up in open positions
 MAX_DAILY_LOSS_USD = 30.0         # realized loss kill-switch (today, ET)
 MAX_CONTRACTS_PER_ORDER = 5
 MAX_CONTRACTS_PER_STRIKE = 10
-MIN_EDGE_CENTS = 15.0             # must clear fees + spread + BRTI/Coinbase basis
+MIN_EDGE_CENTS = 8.0              # NET-of-fee edge (see engine.actionable_edge).
+                                  # Backtest sweep on 6d/27 events shows SELL t-stat peaks here;
+                                  # raising past ~9¢ kills SELL signal entirely. BUY is saturated.
 MAX_ORDERS_PER_MINUTE = 4
-MIN_MINUTES_TO_CLOSE = 5.0        # stop trading near BRTI averaging window
+MIN_MINUTES_TO_CLOSE = 2.0        # path-dependent pricer is now correct in the
+                                  # final minutes (averaging-window variance
+                                  # collapse + realized-portion lock-in). The 5-min
+                                  # cushion was tuned to the old endpoint pricer's
+                                  # near-expiry bias and is no longer warranted.
 KILL_FILE = Path(".kill")
 # --------------------------------------------------
 
@@ -206,16 +212,7 @@ class Executor:
         if max_count < 1:
             return None
 
-        # Final edge sanity-check after fees: fee in cents per contract.
-        fee_cents_per = kalshi_fee_cents(limit_cents, 1)
-        if edge - fee_cents_per < MIN_EDGE_CENTS / 2:
-            # Fee eats too much of the edge. Skip.
-            log.debug(
-                "skip %s: edge=%.1f¢ fee=%d¢ leaves <%.1f¢",
-                row.market_ticker, edge, fee_cents_per, MIN_EDGE_CENTS / 2,
-            )
-            return None
-
+        # `edge` is already net of fees (see engine.actionable_edge).
         return OrderTicket(
             market_ticker=row.market_ticker,
             event_ticker=row.event_ticker,

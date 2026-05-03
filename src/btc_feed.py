@@ -104,3 +104,7 @@ class CoinbaseFeed:
 
 def closes(candles: Sequence[Candle]) -> list[float]:
     return [c.close for c in candles]
+
+
+def ohlc(candles: Sequence[Candle]) -> list[tuple[float, float, float, float]]:
+    return [(c.open, c.high, c.low, c.close) for c in candles]
