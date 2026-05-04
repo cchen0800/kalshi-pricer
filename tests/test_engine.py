@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 
 import pytest
@@ -12,15 +11,24 @@ from src.engine import actionable_edge
 from src.positions import kalshi_fee_cents
 
 
-def make_row(*, model_prob: float, yes_bid: float | None, yes_ask: float | None) -> PollRow:
+def make_row(
+    *,
+    model_prob: float,
+    yes_bid: float | None,
+    yes_ask: float | None,
+    strike: float = 79_500.0,   # ~0.6% away from default spot — passes distance gate
+    spot: float = 80_000.0,
+    sigma: float = 0.60,        # passes σ gate
+    minutes_left: float = 30.0, # passes time gate
+) -> PollRow:
     return PollRow(
         ts_ms=int(time.time() * 1000),
         event_ticker="KXBTCD-26MAY0113",
-        market_ticker="KXBTCD-26MAY0113-T80000",
-        strike=80_000.0,
-        spot=80_000.0,
-        sigma=0.50,
-        minutes_left=30.0,
+        market_ticker=f"KXBTCD-26MAY0113-T{int(strike)}",
+        strike=strike,
+        spot=spot,
+        sigma=sigma,
+        minutes_left=minutes_left,
         model_prob=model_prob,
         yes_bid=yes_bid,
         yes_ask=yes_ask,
@@ -68,5 +76,56 @@ def test_no_book_returns_none():
 def test_picks_larger_side():
     # Symmetric model, asymmetric book: ask much wider than bid → sell side bigger.
     row = make_row(model_prob=0.50, yes_bid=0.65, yes_ask=0.95)
+    side, _edge = actionable_edge(row)
+    assert side == "SELL_YES"
+
+
+# ---- Regime gates for BUY_YES ----
+
+def test_buy_gate_blocks_low_sigma():
+    # Same buy-edge setup as test_buy_edge_subtracts_fee but σ below cutoff.
+    row = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25, sigma=0.30)
+    side, edge = actionable_edge(row)
+    assert side == "NONE"
+    assert edge == 0.0
+
+
+def test_buy_gate_blocks_atm_strike():
+    # Strike == spot → distance 0 < 0.10% gate.
+    row = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25, strike=80_000.0, spot=80_000.0)
+    side, edge = actionable_edge(row)
+    assert side == "NONE"
+    assert edge == 0.0
+
+
+def test_buy_gate_blocks_near_close():
+    # 10 minutes left < 15-minute floor.
+    row = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25, minutes_left=10.0)
+    side, edge = actionable_edge(row)
+    assert side == "NONE"
+    assert edge == 0.0
+
+
+def test_sell_not_gated_by_regime():
+    # Same low-σ ATM near-close conditions that block buys must not block sells:
+    # closing an existing long always has to be possible.
+    row = make_row(
+        model_prob=0.10, yes_bid=0.50, yes_ask=0.55,
+        strike=80_000.0, spot=80_000.0, sigma=0.20, minutes_left=3.0,
+    )
+    side, edge = actionable_edge(row)
+    assert side == "SELL_YES"
+    expected_fee = kalshi_fee_cents(50, 1)
+    assert edge == pytest.approx(40.0 - expected_fee)
+
+
+def test_buy_falls_through_to_sell_when_gated():
+    # Buy is bigger gross but blocked by the σ gate; sell side is positive
+    # and ungated, so we should return SELL_YES (not NONE).
+    # Need: model > ask (buy edge), bid > model (sell edge), buy > sell on
+    # gross terms. e.g. model=0.40, ask=0.05 (buy gross 35c), bid=0.80 (sell
+    # gross 40c). Hm — sell is bigger here. Try model=0.50, ask=0.10 (buy
+    # 40c), bid=0.65 (sell 15c) → buy > sell, but σ blocks buy.
+    row = make_row(model_prob=0.50, yes_bid=0.65, yes_ask=0.10, sigma=0.20)
     side, _edge = actionable_edge(row)
     assert side == "SELL_YES"

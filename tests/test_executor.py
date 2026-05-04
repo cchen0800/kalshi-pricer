@@ -46,7 +46,7 @@ def make_row(
     yes_ask: float | None = 0.25,
     minutes_left: float = 30.0,
     spot: float = 80_000.0,
-    strike: float = 80_000.0,
+    strike: float = 79_500.0,  # ~0.6% from spot — passes engine.actionable_edge gates
 ) -> PollRow:
     edge = model_prob * 100 - (yes_bid + yes_ask) * 50 if yes_bid and yes_ask else 0.0
     return PollRow(

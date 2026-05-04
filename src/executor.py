@@ -56,11 +56,11 @@ MIN_EDGE_CENTS = 8.0              # NET-of-fee edge (see engine.actionable_edge)
                                   # Backtest sweep on 6d/27 events shows SELL t-stat peaks here;
                                   # raising past ~9¢ kills SELL signal entirely. BUY is saturated.
 MAX_ORDERS_PER_MINUTE = 4
-MIN_MINUTES_TO_CLOSE = 2.0        # path-dependent pricer is now correct in the
-                                  # final minutes (averaging-window variance
-                                  # collapse + realized-portion lock-in). The 5-min
-                                  # cushion was tuned to the old endpoint pricer's
-                                  # near-expiry bias and is no longer warranted.
+MIN_MINUTES_TO_CLOSE = 0.25       # 15s execution buffer; the path-dependent
+                                  # pricer specifically models T<W (averaging-window
+                                  # variance collapse + realized-portion lock-in),
+                                  # so the cushion only needs to cover order-placement
+                                  # latency, not pricer bias.
 KILL_FILE = Path(".kill")
 # --------------------------------------------------
 
@@ -135,6 +135,17 @@ class Executor:
                 f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} >= ${MAX_DAILY_LOSS_USD:.2f}",
             )
 
+        # Guard: time to close. Runs before the candidate scan so we don't
+        # waste cycles on a poll we won't act on, and so the message doesn't
+        # get masked by the engine's stricter BUY gate (which would otherwise
+        # return "no rows above MIN_EDGE_CENTS" for every too-close-to-settle
+        # row, hiding the time-based reason).
+        if rows and rows[0].minutes_left < MIN_MINUTES_TO_CLOSE:
+            return Decision(
+                False,
+                f"too close to settle: T-{rows[0].minutes_left:.1f}min < {MIN_MINUTES_TO_CLOSE}min",
+            )
+
         # Find best candidate.
         candidates: list[tuple[float, PollRow, str, float]] = []
         for r in rows:
@@ -145,13 +156,6 @@ class Executor:
         if not candidates:
             return Decision(False, "no rows above MIN_EDGE_CENTS")
         candidates.sort(key=lambda x: -x[0])
-
-        # Guard: time to close (use the freshest row — they all share minutes_left).
-        if rows and rows[0].minutes_left < MIN_MINUTES_TO_CLOSE:
-            return Decision(
-                False,
-                f"too close to settle: T-{rows[0].minutes_left:.1f}min < {MIN_MINUTES_TO_CLOSE}min",
-            )
 
         for _, row, side, edge in candidates:
             ticket = self._build_ticket(row, side, edge, snap)

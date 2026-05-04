@@ -141,12 +141,40 @@ def build_poll_rows(
     return rows
 
 
+# ---- Regime gates for opening new long positions ----
+# Identified from the first 33 live trades (May 2-4, 2026): wins concentrated
+# at σ>55% / strike >0.4% from spot / T>30min, losses concentrated at σ<25%
+# / ATM (±0.1%) / T<15min. Cutoffs sit slightly inside each observed
+# good-regime boundary. SELLs (closing existing longs) are NOT gated — we
+# always want to be able to realize a positive sell edge to exit cleanly.
+BUY_GATE_MIN_SIGMA = 0.50          # 60-min annualized realized vol
+BUY_GATE_MIN_DIST_PCT = 0.0010     # |strike - spot| / spot
+BUY_GATE_MIN_MINUTES = 15.0        # minutes left to close
+
+
+def _passes_buy_gates(row: PollRow) -> bool:
+    if row.sigma is None or row.sigma < BUY_GATE_MIN_SIGMA:
+        return False
+    if row.spot is None or row.spot <= 0 or row.strike is None:
+        return False
+    if abs(row.strike - row.spot) / row.spot < BUY_GATE_MIN_DIST_PCT:
+        return False
+    if row.minutes_left is None or row.minutes_left < BUY_GATE_MIN_MINUTES:
+        return False
+    return True
+
+
 def actionable_edge(row: PollRow) -> tuple[str, float]:
     """Return (side, cents) of best lift-the-market edge, NET of Kalshi taker fee.
 
     side ∈ {'BUY_YES','SELL_YES','NONE'}. Returned `cents` is what we'd actually
     pocket per contract after the exchange fee — at price=50¢ the fee is ~2¢,
     near 0¢/100¢ it's ~0¢, so 50/50 contracts must clear a higher gross edge.
+
+    BUY_YES is additionally gated by regime conditions (see _passes_buy_gates):
+    we only open new longs when σ is high enough, the strike is far enough
+    from spot, and there's enough time left. SELL_YES is not gated — closing
+    a long is always allowed regardless of regime.
     """
     if row.yes_ask is not None:
         ask_cents = int(round(row.yes_ask * 100))
@@ -160,9 +188,12 @@ def actionable_edge(row: PollRow) -> tuple[str, float]:
         sell = row.yes_bid * 100.0 - row.model_prob * 100.0 - fee
     else:
         sell = float("-inf")
-    if buy >= sell and buy > 0:
+
+    buy_eligible = buy > 0 and _passes_buy_gates(row)
+    sell_eligible = sell > 0
+    if buy_eligible and (not sell_eligible or buy >= sell):
         return "BUY_YES", buy
-    if sell > 0:
+    if sell_eligible:
         return "SELL_YES", sell
     return "NONE", 0.0
 
