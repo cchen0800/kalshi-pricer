@@ -17,6 +17,7 @@ import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -34,18 +35,27 @@ NY_TZ = ZoneInfo("America/New_York")
 
 
 def _event_title(event_ticker: str) -> str:
-    """Render a Kalshi-style human title from a KXBTCD ticker.
+    """Render the title in Kalshi's own phrasing.
 
-    `KXBTCD-26APR2802` → `Bitcoin · Apr 28, 2:00 AM EDT`.
+    `KXBTCD-26APR2802` → `Bitcoin price tomorrow at 2am EDT`.
     Falls back to the raw ticker if it can't be parsed.
     """
     close_dt = event_close_utc(event_ticker)
     if close_dt is None:
         return event_ticker
     ny = close_dt.astimezone(NY_TZ)
+    today = datetime.now(NY_TZ).date()
+    if ny.date() == today:
+        when = "today"
+    elif ny.date() == today + timedelta(days=1):
+        when = "tomorrow"
+    else:
+        when = f"on {ny.strftime('%b')} {ny.day}"
+
     hour12 = ny.hour % 12 or 12
-    ampm = "AM" if ny.hour < 12 else "PM"
-    return f"Bitcoin · {ny.strftime('%b')} {ny.day}, {hour12}:00 {ampm} {ny.strftime('%Z')}"
+    ampm = "am" if ny.hour < 12 else "pm"
+    time_str = f"{hour12}{ampm}" if ny.minute == 0 else f"{hour12}:{ny.minute:02d}{ampm}"
+    return f"Bitcoin price {when} at {time_str} {ny.strftime('%Z')}"
 
 ROOT = Path(__file__).parent
 TEMPLATE = ROOT / "templates" / "dashboard.html"

@@ -542,7 +542,7 @@
       display: block;  /* let strike-label render naturally; no ::before */
     }
     #grid td:nth-child(1)::before { content: none; }
-    #grid td:nth-child(2)::before { content: "Market"; }
+    #grid td:nth-child(2)::before { content: "Chance"; }
     #grid td:nth-child(3)::before { content: "Model"; }
     #grid td:nth-child(4)::before { content: "Yes"; }
     #grid td:nth-child(5)::before { content: "No"; }
@@ -685,7 +685,7 @@
     <thead>
       <tr>
         <th>Strike</th>
-        <th>Market</th>
+        <th>Chance</th>
         <th>Model</th>
         <th class="pill-cell">Yes</th>
         <th class="pill-cell">No</th>
@@ -807,7 +807,7 @@
       <thead><tr><th style="width:18%">Column</th><th>What it means</th></tr></thead>
       <tbody>
         <tr><td>Strike</td><td>The line in the sand for this row. <code>$80,000 or above</code> means the bet is "BTC closes above $80,000."</td></tr>
-        <tr><td>Market</td><td>What the market collectively thinks the chance is, as a percent.</td></tr>
+        <tr><td>Chance</td><td>What the market collectively thinks the chance is, as a percent. Same number Kalshi shows under "Chance".</td></tr>
         <tr><td>Model</td><td>What <em>our</em> model thinks the chance is. <strong>This is the column Kalshi doesn't show you</strong> — it's the whole point of this page.</td></tr>
         <tr><td>Yes</td><td><span class="pill-demo yes">Yes 70¢</span> — what you'd pay <em>right now</em> to buy a YES contract.</td></tr>
         <tr><td>No</td><td><span class="pill-demo no">No 30¢</span> — what you'd pay right now to buy a NO contract.</td></tr>
@@ -823,7 +823,7 @@
       <thead><tr><th>Field</th><th>What it tells you</th></tr></thead>
       <tbody>
         <tr><td>Big BTC price</td><td>The current Bitcoin price (from Coinbase). Updates every second or two.</td></tr>
-        <tr><td>Bitcoin · May 3, 6:00 PM EDT</td><td>Which hourly bet you're looking at. Each hour has its own contracts.</td></tr>
+        <tr><td>Bitcoin price today at 6pm EDT</td><td>Which hourly bet you're looking at. Each hour has its own contracts. Matches Kalshi's market title verbatim.</td></tr>
         <tr><td>σ (60M, ann.)</td><td>How jumpy BTC has been in the last 60 minutes, expressed as an annualized percent. <strong>Below 25%: BTC is calm; the model's signals are mostly noise.</strong> Above 50%: BTC is moving; signals are more meaningful.</td></tr>
         <tr><td>Time to close</td><td>Minutes:seconds until trading halts for this hour and the contracts settle.</td></tr>
         <tr><td>Edge threshold</td><td>The minimum disagreement we need before we flag a row.</td></tr>
