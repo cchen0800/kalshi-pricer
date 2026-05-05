@@ -7,7 +7,7 @@ import time
 import pytest
 
 from src.db import PollRow
-from src.engine import actionable_edge
+from src.engine import actionable_edge, build_shadow_signals
 from src.positions import kalshi_fee_cents
 
 
@@ -129,3 +129,73 @@ def test_buy_falls_through_to_sell_when_gated():
     row = make_row(model_prob=0.50, yes_bid=0.65, yes_ask=0.10, sigma=0.20)
     side, _edge = actionable_edge(row)
     assert side == "SELL_YES"
+
+
+# ---- Shadow signal logging ----
+# Shadow signals capture every "interesting" model decision — even when gates
+# block trading — so we can backtest gate sensitivity without re-running the
+# pricer over poll history.
+
+def test_shadow_signal_logged_when_buy_edge_blocked_by_gate():
+    # Same buy-edge setup as the σ-gate test: actionable_edge returns NONE
+    # because σ is too low, but the model still saw a positive raw buy edge.
+    # That's exactly what shadow_signals must capture.
+    row = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25, sigma=0.30)
+    sigs = build_shadow_signals([row])
+    assert len(sigs) == 1
+    s = sigs[0]
+    # Buy raw edge is positive (we want this market) but σ gate fails.
+    assert s.buy_edge_net_cents is not None and s.buy_edge_net_cents > 0
+    assert s.gate_sigma_passed == 0
+    assert s.gate_dist_passed == 1   # default strike 79_500 vs spot 80_000
+    assert s.gate_time_passed == 1
+    assert s.chosen_side == "NONE"   # what actionable_edge() actually returned
+    assert s.chosen_edge_cents == 0.0
+
+
+def test_shadow_signal_logged_when_buy_passes_all_gates():
+    row = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
+    sigs = build_shadow_signals([row])
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s.gate_sigma_passed == 1
+    assert s.gate_dist_passed == 1
+    assert s.gate_time_passed == 1
+    assert s.chosen_side == "BUY_YES"
+    assert s.chosen_edge_cents > 0
+
+
+def test_no_shadow_when_model_inside_book():
+    # model=50c, bid=49c, ask=51c — both raw edges negative, nothing to log.
+    row = make_row(model_prob=0.50, yes_bid=0.49, yes_ask=0.51)
+    sigs = build_shadow_signals([row])
+    assert sigs == []
+
+
+def test_shadow_signal_records_both_side_edges():
+    # Symmetric setup that has positive sell-side raw edge (bid > model + fee).
+    row = make_row(model_prob=0.30, yes_bid=0.50, yes_ask=0.95)
+    sigs = build_shadow_signals([row])
+    assert len(sigs) == 1
+    s = sigs[0]
+    # Sell raw is positive: bid 50c, model 30c → gross 20c, minus ~2c fee.
+    assert s.sell_edge_net_cents is not None and s.sell_edge_net_cents > 0
+    # Buy raw is deeply negative: ask 95c, model 30c → -65c.
+    assert s.buy_edge_net_cents is not None and s.buy_edge_net_cents < 0
+
+
+def test_shadow_signal_dist_gate_flag_matches_distance():
+    # Strike == spot → dist gate fails.
+    atm = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25,
+                   strike=80_000.0, spot=80_000.0)
+    sigs = build_shadow_signals([atm])
+    assert len(sigs) == 1
+    assert sigs[0].gate_dist_passed == 0
+
+
+def test_shadow_signal_time_gate_flag_matches_minutes_left():
+    near_close = make_row(model_prob=0.80, yes_bid=0.20, yes_ask=0.25,
+                          minutes_left=10.0)
+    sigs = build_shadow_signals([near_close])
+    assert len(sigs) == 1
+    assert sigs[0].gate_time_passed == 0

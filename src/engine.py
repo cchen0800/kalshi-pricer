@@ -15,7 +15,7 @@ from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from src.btc_feed import CoinbaseFeed, closes, ohlc
-from src.db import PollRow, insert_polls, open_db
+from src.db import PollRow, ShadowSignal, insert_polls, insert_shadow_signals, open_db
 from src.kalshi_client import KalshiClient
 from src.positions import kalshi_fee_cents
 from src.pricer import edge_cents, prob_above_strike, prob_above_strike_path_dependent
@@ -164,6 +164,38 @@ def _passes_buy_gates(row: PollRow) -> bool:
     return True
 
 
+def _net_edges(row: PollRow) -> tuple[float | None, float | None]:
+    """Return (buy_net_cents, sell_net_cents) — post-fee edges per side.
+
+    Either may be None when the corresponding book side is missing. Negative
+    values indicate the model disagrees with the book in that direction.
+    Used by both actionable_edge() and shadow signal logging."""
+    if row.yes_ask is not None:
+        ask_cents = int(round(row.yes_ask * 100))
+        fee = kalshi_fee_cents(max(1, min(99, ask_cents)), 1)
+        buy: float | None = row.model_prob * 100.0 - row.yes_ask * 100.0 - fee
+    else:
+        buy = None
+    if row.yes_bid is not None:
+        bid_cents = int(round(row.yes_bid * 100))
+        fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
+        sell: float | None = row.yes_bid * 100.0 - row.model_prob * 100.0 - fee
+    else:
+        sell = None
+    return buy, sell
+
+
+def _gate_flags(row: PollRow) -> tuple[int, int, int]:
+    """Per-gate pass booleans for shadow logging. Mirrors _passes_buy_gates."""
+    sig = int(row.sigma is not None and row.sigma >= BUY_GATE_MIN_SIGMA)
+    if row.spot is None or row.spot <= 0 or row.strike is None:
+        dist = 0
+    else:
+        dist = int(abs(row.strike - row.spot) / row.spot >= BUY_GATE_MIN_DIST_PCT)
+    t = int(row.minutes_left is not None and row.minutes_left >= BUY_GATE_MIN_MINUTES)
+    return sig, dist, t
+
+
 def actionable_edge(row: PollRow) -> tuple[str, float]:
     """Return (side, cents) of best lift-the-market edge, NET of Kalshi taker fee.
 
@@ -176,18 +208,9 @@ def actionable_edge(row: PollRow) -> tuple[str, float]:
     from spot, and there's enough time left. SELL_YES is not gated — closing
     a long is always allowed regardless of regime.
     """
-    if row.yes_ask is not None:
-        ask_cents = int(round(row.yes_ask * 100))
-        fee = kalshi_fee_cents(max(1, min(99, ask_cents)), 1)
-        buy = row.model_prob * 100.0 - row.yes_ask * 100.0 - fee
-    else:
-        buy = float("-inf")
-    if row.yes_bid is not None:
-        bid_cents = int(round(row.yes_bid * 100))
-        fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
-        sell = row.yes_bid * 100.0 - row.model_prob * 100.0 - fee
-    else:
-        sell = float("-inf")
+    buy_or_none, sell_or_none = _net_edges(row)
+    buy = buy_or_none if buy_or_none is not None else float("-inf")
+    sell = sell_or_none if sell_or_none is not None else float("-inf")
 
     buy_eligible = buy > 0 and _passes_buy_gates(row)
     sell_eligible = sell > 0
@@ -196,6 +219,44 @@ def actionable_edge(row: PollRow) -> tuple[str, float]:
     if sell_eligible:
         return "SELL_YES", sell
     return "NONE", 0.0
+
+
+def build_shadow_signals(rows: Iterable[PollRow]) -> list[ShadowSignal]:
+    """One row per (poll, market) where either raw side has positive net edge.
+
+    Persists what the engine *thought* — not just what it traded — so future
+    backtests can ask "what if σ floor were 0.40?" without re-running the
+    pricer over poll history. Skipping rows where both sides are negative
+    keeps volume sane (most rows in calm markets fall here)."""
+    out: list[ShadowSignal] = []
+    for row in rows:
+        buy_net, sell_net = _net_edges(row)
+        # Only log "interesting" rows — at least one side must look tradeable
+        # before fees, otherwise this is just noise duplicating polls.
+        if (buy_net is None or buy_net <= 0) and (sell_net is None or sell_net <= 0):
+            continue
+        sig_p, dist_p, time_p = _gate_flags(row)
+        side, cents = actionable_edge(row)
+        out.append(ShadowSignal(
+            ts_ms=row.ts_ms,
+            event_ticker=row.event_ticker,
+            market_ticker=row.market_ticker,
+            strike=row.strike,
+            spot=row.spot,
+            sigma=row.sigma,
+            minutes_left=row.minutes_left,
+            model_prob=row.model_prob,
+            yes_bid=row.yes_bid,
+            yes_ask=row.yes_ask,
+            buy_edge_net_cents=buy_net,
+            sell_edge_net_cents=sell_net,
+            gate_sigma_passed=sig_p,
+            gate_dist_passed=dist_p,
+            gate_time_passed=time_p,
+            chosen_side=side,
+            chosen_edge_cents=cents,
+        ))
+    return out
 
 
 def run_one_poll(
@@ -260,6 +321,12 @@ def run_one_poll(
         realized_partial_avg=realized_partial_avg,
     )
     n = insert_polls(db, rows)
+    shadows = build_shadow_signals(rows)
+    if shadows:
+        try:
+            insert_shadow_signals(db, shadows)
+        except Exception:
+            log.exception("shadow_signals insert failed; continuing")
 
     flagged = [r for r in rows if abs(actionable_edge(r)[1]) > cfg.edge_threshold_cents]
     flagged.sort(key=lambda r: -abs(actionable_edge(r)[1]))

@@ -24,8 +24,10 @@ from src.executor import (
 from src.engine import EngineConfig, run
 from src.executor import KILL_FILE
 from src.fill_sync import FillSyncer
+from src.kalshi_client import KalshiClient
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramKillListener, TelegramNotifier
+from src.settlement_scraper import SettlementScraper
 from src.trade_history import format_pnl_telegram, format_trades_telegram
 
 from main import load_config
@@ -83,6 +85,10 @@ def main() -> int:
         log.info("DRY-RUN MODE — orders will be logged to intended_orders only")
 
     trader: KalshiTrader | None = None
+    # Read-only client for the settlement scraper. Engine has its own internal
+    # client for poll fetches; this one's lifecycle is independent so the
+    # scraper can run inside the on_poll callback without coupling to engine.
+    scrape_client: KalshiClient | None = None
     notifier = TelegramNotifier()
     # Build read-side Telegram handlers. Each opens its own short-lived DB
     # connection so it doesn't have to coordinate with the executor's writer.
@@ -106,12 +112,17 @@ def main() -> int:
 
         kill_listener.start()
 
+        scrape_client = KalshiClient()
         with open_db(cfg.db_path) as db:
             executor = Executor(db, trader, live=args.live, notifier=notifier)
             # Local mirror of Kalshi fills + settlements, for offline analysis.
             # Throttled to once / 60s — the dashboard reads live so we don't
             # need fresher than that here.
             syncer = FillSyncer(trader, interval_s=60.0) if trader is not None else None
+            # Ground-truth resolution scrape for *every* settled market — fills
+            # the gap that portfolio_settlements only covers markets we held.
+            # 5min cadence: events close hourly, so this is far more than enough.
+            scraper = SettlementScraper(scrape_client, interval_s=300.0)
 
             def on_poll(rows):
                 d = executor.handle_poll(rows)
@@ -121,12 +132,15 @@ def main() -> int:
                     log.debug("no order: %s", d.reason)
                 if syncer is not None:
                     syncer.maybe_sync(db)
+                scraper.maybe_scrape(db)
 
             run(cfg, on_poll=on_poll)
     finally:
         kill_listener.stop()
         if trader is not None:
             trader.close()
+        if scrape_client is not None:
+            scrape_client.close()
         notifier.close()
     return 0
 
