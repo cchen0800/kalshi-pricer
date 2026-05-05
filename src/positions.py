@@ -92,8 +92,13 @@ def snapshot(conn: sqlite3.Connection, trader: Any | None) -> PositionSnapshot |
             sett_by_market[mt] = s
 
     midnight_ms = _midnight_et_ms()
-    open_by_market: dict[tuple[str, str], int] = {}
-    open_notional_usd = 0.0
+    # Aggregate buys (count, dollar cost) and sells (count) per (market, side)
+    # for unsettled markets. open_notional is the cost basis of the *remaining*
+    # net long, not the signed sum of limit_price*count — which would leave
+    # ghost capital behind whenever a position was bought high then sold low,
+    # eventually locking the bot out of MAX_NOTIONAL_USD with zero open contracts.
+    buys: dict[tuple[str, str], tuple[int, float]] = {}
+    sells: dict[tuple[str, str], int] = {}
     settled_pnl_by_market: dict[str, float] = {}
 
     for market, side, action, count, limit_cents in conn.execute(
@@ -115,14 +120,26 @@ def snapshot(conn: sqlite3.Connection, trader: Any | None) -> PositionSnapshot |
             continue
 
         key = (market, side)
-        signed_count = count if action == "buy" else -count
-        open_by_market[key] = open_by_market.get(key, 0) + signed_count
-        open_notional_usd += (limit_cents / 100.0) * signed_count
+        if action == "buy":
+            cnt, cost = buys.get(key, (0, 0.0))
+            buys[key] = (cnt + count, cost + count * (limit_cents / 100.0))
+        else:
+            sells[key] = sells.get(key, 0) + count
+
+    open_by_market: dict[tuple[str, str], int] = {}
+    open_notional_usd = 0.0
+    for key, (buy_cnt, buy_cost) in buys.items():
+        net_count = buy_cnt - sells.get(key, 0)
+        if net_count <= 0:
+            continue
+        avg_buy_price = buy_cost / buy_cnt
+        open_by_market[key] = net_count
+        open_notional_usd += net_count * avg_buy_price
 
     return PositionSnapshot(
-        open_notional_usd=max(0.0, open_notional_usd),
+        open_notional_usd=open_notional_usd,
         realized_pnl_today_usd=sum(settled_pnl_by_market.values()),
-        open_contracts_by_market={k: v for k, v in open_by_market.items() if v > 0},
+        open_contracts_by_market=open_by_market,
     )
 
 

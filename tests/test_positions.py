@@ -220,3 +220,37 @@ def test_buys_and_sells_net_in_open_count(db):
     snap = snapshot(db, FakeTrader())
     assert snap is not None
     assert snap.open_contracts_by_market == {(market, "yes"): 6}
+    # Notional = remaining 6 contracts × avg buy price (20¢) = $1.20.
+    # The 4 sold contracts must NOT subtract their sale price (22¢ × 4 = $0.88)
+    # from notional — that would leave a phantom $1.12 if all 10 were sold later.
+    assert snap.open_notional_usd == pytest.approx(1.20)
+
+
+def test_fully_sold_position_releases_all_notional(db):
+    """Regression: bought 10 @ 50¢, sold 10 @ 20¢ on a losing trade.
+    Open contracts → 0; open notional must also → 0. Previously the signed-sum
+    accounting left $3 of ghost capital tied up until settlement, which could
+    cumulatively lock the bot out of MAX_NOTIONAL_USD with zero open positions.
+    """
+    market = "KXBTCD-LOSER-T1"
+    insert_intent(db, market=market, action="buy", count=10, limit_cents=50, coid="b1")
+    insert_intent(db, market=market, action="sell", count=10, limit_cents=20, coid="s1")
+    snap = snapshot(db, FakeTrader())
+    assert snap is not None
+    assert snap.open_contracts_by_market == {}
+    assert snap.open_notional_usd == 0.0
+
+
+def test_avg_buy_price_used_after_partial_sell_at_different_prices(db):
+    """Multiple buys at different prices, then a partial sell. Remaining
+    contracts should be valued at VWAP of the buys, not at the sell price."""
+    market = "KXBTCD-AVG-T1"
+    insert_intent(db, market=market, action="buy", count=4, limit_cents=40, coid="b1")
+    insert_intent(db, market=market, action="buy", count=6, limit_cents=60, coid="b2")
+    # VWAP of buys = (4·40 + 6·60) / 10 = 52¢
+    insert_intent(db, market=market, action="sell", count=3, limit_cents=10, coid="s1")
+    snap = snapshot(db, FakeTrader())
+    assert snap is not None
+    assert snap.open_contracts_by_market == {(market, "yes"): 7}
+    # 7 contracts × 52¢ VWAP = $3.64
+    assert snap.open_notional_usd == pytest.approx(3.64)
