@@ -22,10 +22,13 @@ import collections
 import logging
 import math
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+import httpx
 
 from src.db import PollRow
 from src.engine import actionable_edge
@@ -61,6 +64,12 @@ MIN_MINUTES_TO_CLOSE = 0.25       # 15s execution buffer; the path-dependent
                                   # variance collapse + realized-portion lock-in),
                                   # so the cushion only needs to cover order-placement
                                   # latency, not pricer bias.
+ORDER_TTL_SECONDS = 3.0           # Native IOC: every BUY is priced AT the ask
+                                  # to take, but if the ask moved during placement
+                                  # latency the order ends up resting and gets
+                                  # adverse-selected (48h data: maker fills lost
+                                  # money, taker fills made +83% ROI). After this
+                                  # delay we cancel anything still resting.
 KILL_FILE = Path(".kill")
 # --------------------------------------------------
 
@@ -275,7 +284,37 @@ class Executor:
         )
         self._notify(ticket, mode="LIVE", status=f"submitted (order_id={order_id})")
         self._order_times.append(time.time())
+        if order_id:
+            self._schedule_cancel(order_id, delay_s=ORDER_TTL_SECONDS)
         return Decision(True, "submitted", ticket)
+
+    def _schedule_cancel(self, order_id: str, *, delay_s: float) -> None:
+        """Cancel a (potentially resting) order after `delay_s` seconds.
+
+        Every BUY is priced at the current ask intending to take. If the ask
+        moved up during placement latency the order ends up resting at our
+        original price — and the next person to hit it is the one with newer
+        information than us. The 48h sample showed maker fills lost money
+        net (-$0.85) while taker fills made +$27. Killing anything still
+        resting after a few seconds collapses the adverse-selection window.
+
+        404 from Kalshi means the order is already terminal (filled, expired,
+        or already cancelled). That's the desired outcome — no-op."""
+        if not self.live or self.trader is None:
+            return
+        def _go() -> None:
+            time.sleep(delay_s)
+            try:
+                self.trader.cancel_order(order_id)
+                log.info("[CANCEL] post-place TTL cancel: %s after %.1fs", order_id, delay_s)
+            except httpx.HTTPStatusError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    log.debug("[CANCEL] %s already terminal (404)", order_id)
+                else:
+                    log.warning("[CANCEL] %s failed: %s", order_id, e)
+            except Exception as e:
+                log.warning("[CANCEL] %s exception: %s", order_id, e)
+        threading.Thread(target=_go, daemon=True, name=f"cancel-{order_id[:8]}").start()
 
     def _notify(self, ticket: OrderTicket, *, mode: str, status: str) -> None:
         if self.notifier is None or not self.notifier.enabled:
