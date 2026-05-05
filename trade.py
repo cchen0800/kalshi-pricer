@@ -23,6 +23,7 @@ from src.executor import (
 )
 from src.engine import EngineConfig, run
 from src.executor import KILL_FILE
+from src.fill_sync import FillSyncer
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramKillListener, TelegramNotifier
 from src.trade_history import format_pnl_telegram, format_trades_telegram
@@ -107,6 +108,10 @@ def main() -> int:
 
         with open_db(cfg.db_path) as db:
             executor = Executor(db, trader, live=args.live, notifier=notifier)
+            # Local mirror of Kalshi fills + settlements, for offline analysis.
+            # Throttled to once / 60s — the dashboard reads live so we don't
+            # need fresher than that here.
+            syncer = FillSyncer(trader, interval_s=60.0) if trader is not None else None
 
             def on_poll(rows):
                 d = executor.handle_poll(rows)
@@ -114,6 +119,8 @@ def main() -> int:
                     log.info("ORDER %s — %s", d.reason, d.ticket)
                 else:
                     log.debug("no order: %s", d.reason)
+                if syncer is not None:
+                    syncer.maybe_sync(db)
 
             run(cfg, on_poll=on_poll)
     finally:
