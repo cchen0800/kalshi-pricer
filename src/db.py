@@ -50,10 +50,13 @@ CREATE TABLE IF NOT EXISTS intended_orders (
     status              TEXT    NOT NULL,            -- 'dry_run' | 'submitted' | 'rejected' | 'error'
     reject_reason       TEXT,
     kalshi_order_id     TEXT,
-    raw_response        TEXT
+    raw_response        TEXT,
+    bot_id              TEXT                         -- e.g. 'btc-selective', 'btc-aggressive'
 );
 CREATE INDEX IF NOT EXISTS idx_intended_ts     ON intended_orders(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_intended_market ON intended_orders(market_ticker, ts_ms);
+-- idx_intended_bot is created in _migrate() so it works on pre-existing DBs
+-- where the bot_id column has to be added via ALTER TABLE first.
 
 CREATE TABLE IF NOT EXISTS fills (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +160,25 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent in-place migrations for older DBs.
+
+    `CREATE TABLE IF NOT EXISTS` won't add columns to a pre-existing table, so
+    schema changes for the live DB live here.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(intended_orders)")}
+    if "bot_id" not in cols:
+        conn.execute("ALTER TABLE intended_orders ADD COLUMN bot_id TEXT")
+    # Always ensure the index exists (covers both fresh and migrated DBs;
+    # has to run after the ALTER above on old DBs).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_intended_bot "
+        "ON intended_orders(bot_id, ts_ms)"
+    )
 
 
 @contextmanager

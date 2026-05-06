@@ -4,7 +4,8 @@ Default is --dry-run: same code path, same order tickets logged to
 intended_orders, but no POST. Use --live (and answer the confirmation prompt)
 to actually place orders.
 
-Hardcoded $30 budget — see src/executor.py guards.
+--profile selects the bot's risk profile (see src/executor.BOT_PROFILES).
+Profiles are hardcoded in src/executor.py; YAML cannot widen any cap.
 """
 
 from __future__ import annotations
@@ -12,17 +13,16 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from src.db import open_db
 from src.executor import (
-    MAX_DAILY_LOSS_USD,
-    MAX_NOTIONAL_USD,
-    MIN_EDGE_CENTS,
+    BOT_PROFILES,
     MIN_MINUTES_TO_CLOSE,
+    BotProfile,
     Executor,
 )
 from src.engine import EngineConfig, run
-from src.executor import KILL_FILE
 from src.fill_sync import FillSyncer
 from src.kalshi_client import KalshiClient
 from src.kalshi_trader import KalshiTrader
@@ -34,6 +34,14 @@ from main import load_config
 
 log = logging.getLogger("trade")
 
+# Per-profile config file. Mirrors the BOT_PROFILES dict in executor.py.
+# Keeping this mapping here (not in executor.py) so the executor remains free
+# of filesystem assumptions — it only knows about risk knobs.
+PROFILE_CONFIGS: dict[str, str] = {
+    "selective": "config.yaml",
+    "aggressive": "config.aggressive.yaml",
+}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
@@ -41,22 +49,36 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--dry-run", action="store_true", help="log intended orders, do not POST")
     g.add_argument("--live", action="store_true", help="place real orders against Kalshi")
     p.add_argument(
+        "--profile",
+        choices=sorted(BOT_PROFILES.keys()),
+        default="selective",
+        help="risk profile (default: selective)",
+    )
+    p.add_argument(
         "--yes-i-know",
         action="store_true",
         help="skip the live-mode confirmation prompt",
     )
+    p.add_argument(
+        "--no-telegram-listen",
+        action="store_true",
+        help="skip the Telegram kill listener (use on all but one bot when "
+             "multiple bots share a Telegram bot — Telegram only allows one "
+             "long-poll holder, others get 409 Conflict)",
+    )
     return p.parse_args()
 
 
-def confirm_live() -> bool:
+def confirm_live(profile: BotProfile) -> bool:
     print("=" * 70)
-    print("LIVE TRADING — REAL MONEY")
+    print(f"LIVE TRADING — REAL MONEY  [profile: {profile.bot_id}]")
     print("=" * 70)
-    print(f"  Max notional outstanding: ${MAX_NOTIONAL_USD:.2f}")
-    print(f"  Max daily realized loss:  ${MAX_DAILY_LOSS_USD:.2f}")
-    print(f"  Min edge to act:          {MIN_EDGE_CENTS:.1f}¢")
+    print(f"  Max notional outstanding: ${profile.max_notional_usd:.2f}")
+    print(f"  Max daily realized loss:  ${profile.max_daily_loss_usd:.2f}")
+    print(f"  Min edge to act:          {profile.min_edge_cents:.1f}¢")
     print(f"  Stop trading at:          T-{MIN_MINUTES_TO_CLOSE:.1f}min before close")
-    print(f"  Kill switch:              touch .kill")
+    print(f"  Kill switch:              touch {profile.kill_file}")
+    print(f"  COID prefix:              {profile.coid_prefix}")
     print("=" * 70)
     print("Type 'i accept the risk' to proceed:")
     try:
@@ -72,17 +94,23 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = parse_args()
-    cfg: EngineConfig = load_config()
+    profile = BOT_PROFILES[args.profile]
+    cfg_path = Path(__file__).parent / PROFILE_CONFIGS[args.profile]
+    cfg: EngineConfig = load_config(cfg_path)
+    log.info("profile=%s db=%s", profile.bot_id, cfg.db_path)
 
     if args.live and not args.yes_i_know:
-        if not confirm_live():
+        if not confirm_live(profile):
             print("aborted")
             return 1
 
     if args.live:
-        log.warning("LIVE MODE — real orders will be placed")
+        log.warning("LIVE MODE — real orders will be placed (profile=%s)", profile.bot_id)
     else:
-        log.info("DRY-RUN MODE — orders will be logged to intended_orders only")
+        log.info(
+            "DRY-RUN MODE — orders will be logged to intended_orders only (profile=%s)",
+            profile.bot_id,
+        )
 
     trader: KalshiTrader | None = None
     # Read-only client for the settlement scraper. Engine has its own internal
@@ -101,7 +129,7 @@ def main() -> int:
             return format_trades_telegram(h_db, trader, limit=8)
 
     kill_listener = TelegramKillListener(
-        kill_file=KILL_FILE,
+        kill_file=profile.kill_file,
         command_handlers={"pnl": _pnl, "trades": _trades},
     )
     try:
@@ -110,11 +138,16 @@ def main() -> int:
             bal = trader.get_balance()
             log.info("kalshi balance: %s", bal)
 
-        kill_listener.start()
+        if not args.no_telegram_listen:
+            kill_listener.start()
+        else:
+            log.info("Telegram listener disabled by --no-telegram-listen")
 
         scrape_client = KalshiClient()
         with open_db(cfg.db_path) as db:
-            executor = Executor(db, trader, live=args.live, notifier=notifier)
+            executor = Executor(
+                db, trader, live=args.live, notifier=notifier, profile=profile,
+            )
             # Local mirror of Kalshi fills + settlements, for offline analysis.
             # Throttled to once / 60s — the dashboard reads live so we don't
             # need fresher than that here.

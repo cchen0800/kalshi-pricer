@@ -89,17 +89,32 @@ def _try_init_trader():
         return None
 
 
+def _aggressive_db_path(selective_path: str) -> str:
+    """Sibling DB for the aggressive bot.
+
+    By convention `trade.py --profile aggressive` writes to `pricer.aggressive.db`
+    in the same directory as the selective DB. Derive the path by inserting
+    `.aggressive` before the `.db` suffix so the dashboard can read both.
+    """
+    p = Path(selective_path)
+    if p.suffix == ".db":
+        return str(p.with_suffix("")) + ".aggressive.db"
+    return selective_path + ".aggressive.db"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
     feed = CoinbaseFeed()
     trader = _try_init_trader()
     no_engine = os.environ.get("DASHBOARD_NO_ENGINE") == "1"
+    aggressive_db = _aggressive_db_path(cfg.db_path)
     if no_engine:
         # Pure HTTP frontend. Some other process (typically trade.py) is
         # writing to the same DB; we just read.
-        _state["thread"], _state["stop"], _state["cfg"], _state["feed"], _state["trader"] = (
-            None, None, cfg, feed, trader,
+        _state.update(
+            thread=None, stop=None, cfg=cfg, feed=feed, trader=trader,
+            aggressive_db=aggressive_db,
         )
         try:
             yield
@@ -113,8 +128,9 @@ async def lifespan(app: FastAPI):
     stop = threading.Event()
     th = threading.Thread(target=_engine_thread_target, args=(cfg, stop), daemon=True)
     th.start()
-    _state["thread"], _state["stop"], _state["cfg"], _state["feed"], _state["trader"] = (
-        th, stop, cfg, feed, trader,
+    _state.update(
+        thread=th, stop=stop, cfg=cfg, feed=feed, trader=trader,
+        aggressive_db=aggressive_db,
     )
     try:
         yield
@@ -219,17 +235,22 @@ def api_spot() -> JSONResponse:
 
 
 @app.get("/api/trades")
-def api_trades(limit: int = 50, mode: str = "live") -> JSONResponse:
-    """Trade history + aggregate P&L. Joins DB intents with Kalshi state.
+def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
+    """Trade history + aggregate P&L summary for one of the asset's bots.
 
-    Defaults to live trades; pass `mode=dry_run` to inspect dry-run intents.
+    `bot` is 'selective' (default) or 'aggressive'. Picks which DB to read.
+    Both bots write mode='live' to their own DB, so we always filter mode='live'.
     """
     cfg: EngineConfig = _state["cfg"]
     trader = _state.get("trader")
-    with open_db(cfg.db_path) as db:
-        trades = list_trades(db, trader, mode=mode, limit=limit)
-        s = summarize(db, trader, mode=mode)
-    return JSONResponse({"trades": trades, "summary": s, "mode": mode})
+    if bot == "aggressive":
+        db_path = _state.get("aggressive_db") or cfg.db_path
+    else:
+        db_path = cfg.db_path
+    with open_db(db_path) as db:
+        trades = list_trades(db, trader, mode="live", limit=limit)
+        summary = summarize(db, trader, mode="live")
+    return JSONResponse({"trades": trades, "summary": summary, "bot": bot})
 
 
 @app.get("/api/events")

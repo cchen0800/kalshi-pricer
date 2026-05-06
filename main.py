@@ -12,9 +12,10 @@ from src.engine import EngineConfig, run
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
-def load_config() -> EngineConfig:
+def load_config(path: str | Path | None = None) -> EngineConfig:
     load_dotenv()
-    raw = yaml.safe_load(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    cfg_path = Path(path) if path else CONFIG_PATH
+    raw = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
     return EngineConfig(
         poll_interval_seconds=int(raw.get("poll_interval_seconds", 30)),
         fast_poll_interval_seconds=int(raw.get("fast_poll_interval_seconds", 3)),

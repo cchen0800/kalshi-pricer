@@ -51,13 +51,11 @@ def _md_escape(s: str) -> str:
     return s
 
 # ---- HARDCODED GUARDS — DO NOT MOVE TO CONFIG ----
-MAX_NOTIONAL_USD = 30.0           # max $ tied up in open positions
-MAX_DAILY_LOSS_USD = 30.0         # realized loss kill-switch (today, ET)
+# Per-bot risk knobs live in BOT_PROFILES below. Anything that varies between
+# bots (notional cap, edge floor, kill-file, COID prefix) is profile-scoped.
+# Anything that should never differ between bots stays module-level here.
 MAX_CONTRACTS_PER_ORDER = 5
 MAX_CONTRACTS_PER_STRIKE = 10
-MIN_EDGE_CENTS = 8.0              # NET-of-fee edge (see engine.actionable_edge).
-                                  # Backtest sweep on 6d/27 events shows SELL t-stat peaks here;
-                                  # raising past ~9¢ kills SELL signal entirely. BUY is saturated.
 MAX_ORDERS_PER_MINUTE = 4
 MIN_MINUTES_TO_CLOSE = 0.25       # 15s execution buffer; the path-dependent
                                   # pricer specifically models T<W (averaging-window
@@ -70,7 +68,71 @@ ORDER_TTL_SECONDS = 3.0           # Native IOC: every BUY is priced AT the ask
                                   # adverse-selected (48h data: maker fills lost
                                   # money, taker fills made +83% ROI). After this
                                   # delay we cancel anything still resting.
-KILL_FILE = Path(".kill")
+
+# Hard ceilings. Profile values are validated against these at import time;
+# a typo can never unlock more risk than the ceiling allows.
+_MAX_NOTIONAL_CEILING_USD = 30.0
+_MAX_DAILY_LOSS_CEILING_USD = 30.0
+_MIN_EDGE_FLOOR_CENTS = 2.0       # below this, fee + spread will eat the edge
+
+
+@dataclass(frozen=True)
+class BotProfile:
+    bot_id: str                   # tag written to intended_orders.bot_id
+    coid_prefix: str              # 5-char prefix on client_order_id
+    max_notional_usd: float
+    max_daily_loss_usd: float
+    min_edge_cents: float         # NET-of-fee edge floor (see engine.actionable_edge)
+    kill_file: Path
+
+
+BOT_PROFILES: dict[str, BotProfile] = {
+    # Selective: the original BTC bot. Backtest sweep on 6d/27 events shows SELL
+    # t-stat peaks at 8¢; raising past ~9¢ kills SELL signal entirely.
+    "selective": BotProfile(
+        bot_id="btc-selective",
+        coid_prefix="btcp-",      # legacy prefix; do not change (existing live history)
+        max_notional_usd=30.0,
+        max_daily_loss_usd=30.0,
+        min_edge_cents=8.0,
+        kill_file=Path(".kill"),  # legacy
+    ),
+    # Aggressive: same model + same regime gates, lower edge bar. Trades more
+    # often at thinner expected edge — variance up, EV per trade down. Capped
+    # smaller than selective so a bad day can't drain the whole bankroll.
+    "aggressive": BotProfile(
+        bot_id="btc-aggressive",
+        coid_prefix="btca-",
+        max_notional_usd=10.0,
+        max_daily_loss_usd=10.0,
+        min_edge_cents=3.0,
+        kill_file=Path(".kill.aggressive"),
+    ),
+}
+
+for _name, _p in BOT_PROFILES.items():
+    if _p.max_notional_usd > _MAX_NOTIONAL_CEILING_USD:
+        raise ValueError(
+            f"profile {_name!r} max_notional_usd={_p.max_notional_usd} "
+            f"exceeds ceiling {_MAX_NOTIONAL_CEILING_USD}"
+        )
+    if _p.max_daily_loss_usd > _MAX_DAILY_LOSS_CEILING_USD:
+        raise ValueError(
+            f"profile {_name!r} max_daily_loss_usd={_p.max_daily_loss_usd} "
+            f"exceeds ceiling {_MAX_DAILY_LOSS_CEILING_USD}"
+        )
+    if _p.min_edge_cents < _MIN_EDGE_FLOOR_CENTS:
+        raise ValueError(
+            f"profile {_name!r} min_edge_cents={_p.min_edge_cents} "
+            f"below floor {_MIN_EDGE_FLOOR_CENTS}"
+        )
+
+# Legacy aliases — module-level constants other files (trade.py, etc) may still
+# read. Keep pointing at the selective profile so the no-flag path is unchanged.
+MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_usd
+MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_usd
+MIN_EDGE_CENTS = BOT_PROFILES["selective"].min_edge_cents
+KILL_FILE = BOT_PROFILES["selective"].kill_file
 # --------------------------------------------------
 
 
@@ -86,6 +148,7 @@ class OrderTicket:
     edge_cents: float
     minutes_left: float
     spot: float
+    coid_prefix: str = "btcp-"
 
     @property
     def notional_usd(self) -> float:
@@ -93,7 +156,7 @@ class OrderTicket:
 
     @property
     def client_order_id(self) -> str:
-        return f"btcp-{uuid.uuid4().hex[:24]}"
+        return f"{self.coid_prefix}{uuid.uuid4().hex[:24]}"
 
 
 @dataclass
@@ -111,17 +174,19 @@ class Executor:
         *,
         live: bool,
         notifier: TelegramNotifier | None = None,
+        profile: BotProfile | None = None,
     ) -> None:
         self.conn = conn
         self.trader = trader
         self.live = live
         self.notifier = notifier
+        self.profile = profile or BOT_PROFILES["selective"]
         self._order_times: collections.deque[float] = collections.deque(maxlen=MAX_ORDERS_PER_MINUTE)
 
     def handle_poll(self, rows: list[PollRow]) -> Decision:
         # Guard: kill flag
-        if KILL_FILE.exists():
-            return Decision(False, f"kill file present: {KILL_FILE}")
+        if self.profile.kill_file.exists():
+            return Decision(False, f"kill file present: {self.profile.kill_file}")
 
         # Guard: rate limit (across all polls, not just this one)
         now = time.time()
@@ -133,21 +198,22 @@ class Executor:
         # Snapshot first — this is the source for every per-order risk check
         # below. Fail-closed if we can't read it: in live mode we'd rather
         # miss a trade than open uncapped exposure on stale state.
-        snap = snapshot(self.conn, self.trader)
+        snap = snapshot(self.conn, self.trader, bot_coid_prefix=self.profile.coid_prefix)
         if snap is None:
             return Decision(False, "cannot read positions from Kalshi (fail-closed)")
 
         # Guard: daily loss
-        if snap.total_loss_today_usd() >= MAX_DAILY_LOSS_USD:
+        if snap.total_loss_today_usd() >= self.profile.max_daily_loss_usd:
             return Decision(
                 False,
-                f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} >= ${MAX_DAILY_LOSS_USD:.2f}",
+                f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} "
+                f">= ${self.profile.max_daily_loss_usd:.2f}",
             )
 
         # Guard: time to close. Runs before the candidate scan so we don't
         # waste cycles on a poll we won't act on, and so the message doesn't
         # get masked by the engine's stricter BUY gate (which would otherwise
-        # return "no rows above MIN_EDGE_CENTS" for every too-close-to-settle
+        # return "no rows above min_edge_cents" for every too-close-to-settle
         # row, hiding the time-based reason).
         if rows and rows[0].minutes_left < MIN_MINUTES_TO_CLOSE:
             return Decision(
@@ -159,11 +225,11 @@ class Executor:
         candidates: list[tuple[float, PollRow, str, float]] = []
         for r in rows:
             side, edge = actionable_edge(r)
-            if side == "NONE" or edge < MIN_EDGE_CENTS:
+            if side == "NONE" or edge < self.profile.min_edge_cents:
                 continue
             candidates.append((edge, r, side, edge))
         if not candidates:
-            return Decision(False, "no rows above MIN_EDGE_CENTS")
+            return Decision(False, f"no rows above min_edge_cents={self.profile.min_edge_cents}")
         candidates.sort(key=lambda x: -x[0])
 
         for _, row, side, edge in candidates:
@@ -215,7 +281,7 @@ class Executor:
 
         # Notional cap (only matters for buys; sells free up notional).
         if action == "buy":
-            remaining_notional = MAX_NOTIONAL_USD - snap.open_notional_usd
+            remaining_notional = self.profile.max_notional_usd - snap.open_notional_usd
             cost_per_contract = limit_cents / 100.0
             if cost_per_contract <= 0:
                 return None
@@ -237,6 +303,7 @@ class Executor:
             edge_cents=edge,
             minutes_left=row.minutes_left,
             spot=row.spot,
+            coid_prefix=self.profile.coid_prefix,
         )
 
     def _place(self, ticket: OrderTicket) -> Decision:
@@ -257,6 +324,15 @@ class Executor:
 
         # LIVE
         assert self.trader is not None, "live=True requires trader instance"
+
+        # Write the intent BEFORE the POST so a Kalshi-accepted order can never
+        # exist without a local row backing it. The snapshot's in-flight overlay
+        # treats status='pending' as live exposure (BUY only), so any new BUY
+        # decided in this same instant cannot exceed the cap. After the POST
+        # returns we promote the row to 'submitted' (or 'error').
+        intent_id = self._record_intent(
+            ts_ms, mode, ticket, coid, status="pending", response=None,
+        )
         try:
             resp = self.trader.place_order(
                 ticker=ticket.market_ticker,
@@ -267,15 +343,15 @@ class Executor:
                 limit_price_cents=ticket.limit_price_cents,
             )
         except Exception as e:
-            self._record_intent(
-                ts_ms, mode, ticket, coid, status="error", response=None, reject=str(e)[:500],
+            self._update_intent(
+                intent_id, status="error", response=None, reject=str(e)[:500],
             )
             log.exception("order failed: %s", e)
             return Decision(False, f"order error: {e}")
 
         order_id = (resp.get("order") or {}).get("order_id") or resp.get("order_id")
-        self._record_intent(
-            ts_ms, mode, ticket, coid, status="submitted", response=resp, order_id=order_id,
+        self._update_intent(
+            intent_id, status="submitted", response=resp, order_id=order_id,
         )
         log.info(
             "[LIVE] placed: %s %s %d @ %d¢ on %s  → order_id=%s",
@@ -326,9 +402,10 @@ class Executor:
         # killed every order alert.
         market = _md_escape(ticket.market_ticker)
         status_md = _md_escape(status)
+        bot_md = _md_escape(self.profile.bot_id)
         side_word = "BUY YES" if ticket.action == "buy" else "SELL YES"
         msg = (
-            f"*[{mode}] {side_word}* {ticket.count} @ {ticket.limit_price_cents}¢\n"
+            f"*[{mode} {bot_md}] {side_word}* {ticket.count} @ {ticket.limit_price_cents}¢\n"
             f"`{market}`\n"
             f"strike: ${ticket.spot:,.0f} spot ; T-{ticket.minutes_left:.1f}min\n"
             f"model: {ticket.model_prob*100:.1f}¢  edge: +{ticket.edge_cents:.1f}¢\n"
@@ -348,16 +425,17 @@ class Executor:
         response: dict | None,
         order_id: str | None = None,
         reject: str | None = None,
-    ) -> None:
+    ) -> int:
+        """Insert a fresh intent row. Returns the row id for later updates."""
         import json
-        self.conn.execute(
+        cur = self.conn.execute(
             """
             INSERT INTO intended_orders (
                 ts_ms, mode, event_ticker, market_ticker, side, action,
                 limit_price_cents, count, notional_usd, model_prob, edge_cents,
                 minutes_left, spot, client_order_id, status, reject_reason,
-                kalshi_order_id, raw_response
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                kalshi_order_id, raw_response, bot_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts_ms, mode, ticket.event_ticker, ticket.market_ticker, ticket.side,
@@ -365,5 +443,33 @@ class Executor:
                 ticket.model_prob, ticket.edge_cents, ticket.minutes_left, ticket.spot,
                 coid, status, reject, order_id,
                 json.dumps(response) if response is not None else None,
+                self.profile.bot_id,
+            ),
+        )
+        return cur.lastrowid
+
+    def _update_intent(
+        self,
+        intent_id: int,
+        *,
+        status: str,
+        response: dict | None,
+        order_id: str | None = None,
+        reject: str | None = None,
+    ) -> None:
+        """Promote a 'pending' intent row in place after the POST returns."""
+        import json
+        self.conn.execute(
+            """
+            UPDATE intended_orders
+            SET status = ?, kalshi_order_id = ?, raw_response = ?, reject_reason = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                order_id,
+                json.dumps(response) if response is not None else None,
+                reject,
+                intent_id,
             ),
         )

@@ -333,13 +333,13 @@
   .trades-summary .value.pos { color: var(--green); }
   .trades-summary .value.neg { color: var(--red); }
 
-  #trades-grid td.outcome-won  { color: var(--green); font-weight: 600; }
-  #trades-grid td.outcome-lost { color: var(--red);   font-weight: 600; }
-  #trades-grid td.outcome-open { color: var(--fg-3); }
-  #trades-grid td.pnl-pos { color: var(--green); font-weight: 600; }
-  #trades-grid td.pnl-neg { color: var(--red);   font-weight: 600; }
-  #trades-grid td.muted   { color: var(--fg-3); }
-  #trades-grid .ticker-mini {
+  .trades-grid td.outcome-won  { color: var(--green); font-weight: 600; }
+  .trades-grid td.outcome-lost { color: var(--red);   font-weight: 600; }
+  .trades-grid td.outcome-open { color: var(--fg-3); }
+  .trades-grid td.pnl-pos { color: var(--green); font-weight: 600; }
+  .trades-grid td.pnl-neg { color: var(--red);   font-weight: 600; }
+  .trades-grid td.muted   { color: var(--fg-3); }
+  .trades-grid .ticker-mini {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 10.5px;
     color: var(--fg-3);
@@ -571,45 +571,45 @@
     .trades-summary .value { font-size: 16px; }
     .trades-summary .label { font-size: 10px; }
 
-    /* ---- Trades grid columns (#trades-grid):
+    /* ---- Trades grid columns (.trades-grid):
        1 When | 2 Event | 3 Strike | 4 Side | 5 × | 6 Limit/Fill | 7 Edge |
        8 Notional | 9 Status | 10 Outcome | 11 P&L */
-    #trades-grid td:nth-child(1) {
+    .trades-grid td:nth-child(1) {
       font-size: 11px;
       color: var(--fg-3);
       padding-bottom: 4px;
       display: block;
     }
-    #trades-grid td:nth-child(1)::before { content: none; }
-    #trades-grid td:nth-child(2)::before { content: "Event"; }
-    #trades-grid td:nth-child(3)::before { content: "Strike"; }
-    #trades-grid td:nth-child(4)::before { content: "Side"; }
-    #trades-grid td:nth-child(5)::before { content: "Qty"; }
-    #trades-grid td:nth-child(6)::before { content: "Limit / Fill"; }
-    #trades-grid td:nth-child(7)::before { content: "Edge"; }
-    #trades-grid td:nth-child(8)::before { content: "Notional"; }
-    #trades-grid td:nth-child(9)::before { content: "Status"; }
-    #trades-grid td:nth-child(10)::before { content: "Outcome"; }
-    #trades-grid td:nth-child(11) {
+    .trades-grid td:nth-child(1)::before { content: none; }
+    .trades-grid td:nth-child(2)::before { content: "Event"; }
+    .trades-grid td:nth-child(3)::before { content: "Strike"; }
+    .trades-grid td:nth-child(4)::before { content: "Side"; }
+    .trades-grid td:nth-child(5)::before { content: "Qty"; }
+    .trades-grid td:nth-child(6)::before { content: "Limit / Fill"; }
+    .trades-grid td:nth-child(7)::before { content: "Edge"; }
+    .trades-grid td:nth-child(8)::before { content: "Notional"; }
+    .trades-grid td:nth-child(9)::before { content: "Status"; }
+    .trades-grid td:nth-child(10)::before { content: "Outcome"; }
+    .trades-grid td:nth-child(11) {
       margin-top: 8px;
       padding-top: 8px;
       border-top: 1px solid var(--hairline);
       font-size: 14px;
       font-weight: 600;
     }
-    #trades-grid td:nth-child(11)::before {
+    .trades-grid td:nth-child(11)::before {
       content: "P&L";
       font-size: 11px;
     }
     /* Wrap nested ticker mini-line under strike */
-    #trades-grid .ticker-mini { margin-top: 4px; }
+    .trades-grid .ticker-mini { margin-top: 4px; }
     /* Trades-tab "no rows" placeholder spans full card width */
-    #trades-grid tbody tr td[colspan] {
+    .trades-grid tbody tr td[colspan] {
       display: block;
       text-align: center;
       padding: 24px 16px;
     }
-    #trades-grid tbody tr td[colspan]::before { content: none; }
+    .trades-grid tbody tr td[colspan]::before { content: none; }
 
     /* Footer + guide */
     .footer { margin: 20px 16px; font-size: 11.5px; }
@@ -633,9 +633,46 @@
     .hero { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
     .tabs { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
   }
+
+  /* Top-level asset switcher: navigates between sibling dashboards. */
+  .asset-switcher {
+    display: flex;
+    gap: 8px;
+    padding: 14px 32px 0;
+    background: var(--bg);
+  }
+  .asset-switcher a {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 16px;
+    border-radius: 999px;
+    background: var(--bg-elev);
+    border: 1px solid var(--hairline);
+    color: var(--fg-3);
+    text-decoration: none;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .asset-switcher a:hover { color: var(--fg-1); border-color: var(--fg-3); }
+  .asset-switcher a.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: transparent;
+  }
+  .asset-switcher a.active:hover { color: #fff; }
+  @media (max-width: 720px) { .asset-switcher { padding: 12px 16px 0; } }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.min.js"></script>
 </head>
 <body>
+
+<nav class="asset-switcher">
+  <a class="active" href="https://trade.baggaar.com/">BTC</a>
+  <a href="https://eth.baggaar.com/">ETH</a>
+</nav>
 
 <header class="hero">
   <span class="live-tag">Live</span>
@@ -722,9 +759,9 @@
   </div>
 
   <div class="filters" id="trade-filters">
-    <span class="label">Mode</span>
-    <button class="filter-btn active" data-trade-mode="live">Live</button>
-    <button class="filter-btn" data-trade-mode="dry_run">Dry-run</button>
+    <span class="label">Bot</span>
+    <button class="filter-btn active" data-bot="selective">Selective</button>
+    <button class="filter-btn" data-bot="aggressive">Aggressive</button>
   </div>
 
   <table class="grid" id="trades-grid">
@@ -919,26 +956,50 @@ let closeTsMs = null;
 let currentFilter = "atm";
 const ATM_BAND = 500;  // dollars either side of spot for the ATM filter
 
-// Tabs
+// Animation helpers (Motion One). All no-ops when prefers-reduced-motion or
+// the CDN failed to load — animations are pure polish, never required for
+// correctness.
+const _M = (typeof Motion !== "undefined") ? Motion : null;
+const _reducedMotion = window.matchMedia &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const _animate = (el, kf, opts) => {
+  if (!_M || _reducedMotion || !el) return { finished: Promise.resolve() };
+  return _M.animate(el, kf, opts);
+};
+
+// Tabs — cross-fade panels instead of snapping hidden on/off.
+const _PANELS = ["live", "trades", "guide"];
+function switchTab(target) {
+  const visible = _PANELS.find(p => !document.getElementById("tab-" + p).hidden);
+  if (visible === target) return;
+  const outEl = document.getElementById("tab-" + visible);
+  const inEl  = document.getElementById("tab-" + target);
+  const reveal = () => {
+    outEl.hidden = true;
+    outEl.style.opacity = ""; outEl.style.transform = "";
+    inEl.hidden = false;
+    if (target === "trades") refreshTrades();
+    _animate(inEl, { opacity: [0, 1], transform: ["translateY(6px)", "translateY(0)"] },
+      { duration: 0.22, easing: [0.2, 0, 0, 1] });
+  };
+  _animate(outEl, { opacity: [1, 0], transform: ["translateY(0)", "translateY(4px)"] },
+    { duration: 0.12, easing: "ease-out" }).finished.then(reveal, reveal);
+}
 document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-    const target = tab.dataset.tab;
-    document.getElementById("tab-live").hidden    = target !== "live";
-    document.getElementById("tab-trades").hidden  = target !== "trades";
-    document.getElementById("tab-guide").hidden   = target !== "guide";
-    if (target === "trades") refreshTrades();
+    switchTab(tab.dataset.tab);
   });
 });
 
-// Trade-mode filter (live vs dry-run)
-let tradeMode = "live";
-document.querySelectorAll('[data-trade-mode]').forEach(btn => {
+// Bot filter (selective vs aggressive — different bot profiles, different DBs)
+let selectedBot = "selective";
+document.querySelectorAll('[data-bot]').forEach(btn => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll('[data-trade-mode]').forEach(b => b.classList.remove("active"));
+    document.querySelectorAll('[data-bot]').forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
-    tradeMode = btn.dataset.tradeMode;
+    selectedBot = btn.dataset.bot;
     refreshTrades();
   });
 });
@@ -1100,8 +1161,8 @@ const strikeFromTicker = mt => {
   return last.startsWith("T") ? "$" + last.slice(1) : last;
 };
 const eventLabel = et => {
-  // KXBTCD-26MAY0222 → "May 02 22:00"
-  const m = (et || "").match(/^KXBTCD-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
+  // KXBTCD-26MAY0222 / KXETHD-26MAY0817 → "May 02 22:00"
+  const m = (et || "").match(/^KX[A-Z]+-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
   if (!m) return et || "—";
   return `${m[2]} ${m[3]} ${m[4]}:00`;
 };
@@ -1116,7 +1177,7 @@ const fmtTimeEt = ts_ms => {
 async function refreshTrades() {
   let resp, data;
   try {
-    resp = await fetch(`/api/trades?mode=${encodeURIComponent(tradeMode)}&limit=100`,
+    resp = await fetch(`/api/trades?bot=${encodeURIComponent(selectedBot)}&limit=100`,
                        {cache: "no-store"});
     data = await resp.json();
   } catch (e) {
@@ -1142,7 +1203,7 @@ async function refreshTrades() {
   const tbody = document.getElementById("trades-tbody");
   const trades = data.trades || [];
   if (!trades.length) {
-    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--fg-3); padding:24px;">No ${tradeMode === "live" ? "live" : "dry-run"} orders yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--fg-3); padding:24px;">No ${selectedBot} orders yet.</td></tr>`;
     return;
   }
   const rows = trades.map(t => {
@@ -1154,9 +1215,7 @@ async function refreshTrades() {
                       : t.side === "yes" && t.action === "sell" ? "action SELL_YES" : "action";
     let priceCell;
     if (t.fill_price_cents != null) {
-      const lp = t.limit_price_cents;
-      const fp = t.fill_price_cents;
-      priceCell = `${lp}¢ / <strong>${fp}¢</strong>`;
+      priceCell = `${t.limit_price_cents}¢ / <strong>${t.fill_price_cents}¢</strong>`;
     } else {
       priceCell = `${t.limit_price_cents}¢ / —`;
     }
@@ -1198,6 +1257,14 @@ async function refreshTrades() {
       </tr>`;
   });
   tbody.innerHTML = rows.join("");
+  // Stagger-in rows so a refresh feels like a soft fill rather than a snap.
+  if (_M && !_reducedMotion) {
+    const tr = tbody.querySelectorAll("tr");
+    if (tr.length) {
+      _M.animate(tr, { opacity: [0, 1], transform: ["translateY(4px)", "translateY(0)"] },
+        { duration: 0.18, delay: _M.stagger(0.012), easing: [0.2, 0, 0, 1] });
+    }
+  }
 }
 
 refresh();
@@ -1211,6 +1278,22 @@ setInterval(tickClose, 1000);
 setInterval(() => {
   if (!document.getElementById("tab-trades").hidden) refreshTrades();
 }, 15000);
+
+// Boot: gentle fade-up of the chrome on first paint.
+if (_M && !_reducedMotion) {
+  const bootEls = [
+    document.querySelector(".asset-switcher"),
+    document.querySelector(".hero"),
+    document.getElementById("tabs"),
+    document.getElementById("tab-live"),
+  ].filter(Boolean);
+  bootEls.forEach(el => { el.style.opacity = "0"; });
+  requestAnimationFrame(() => {
+    _M.animate(bootEls,
+      { opacity: [0, 1], transform: ["translateY(6px)", "translateY(0)"] },
+      { duration: 0.32, delay: _M.stagger(0.05), easing: [0.2, 0, 0, 1] });
+  });
+}
 </script>
 
 </body>

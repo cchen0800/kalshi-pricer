@@ -18,15 +18,31 @@ import pytest
 
 from src.db import PollRow, connect
 from src.executor import (
-    KILL_FILE,
+    BOT_PROFILES,
     MAX_CONTRACTS_PER_ORDER,
-    MAX_DAILY_LOSS_USD,
-    MAX_NOTIONAL_USD,
     MAX_ORDERS_PER_MINUTE,
-    MIN_EDGE_CENTS,
     MIN_MINUTES_TO_CLOSE,
+    BotProfile,
     Executor,
 )
+
+# Profile used by tests with a kill-file isolated to tmp_path. Mirrors the
+# selective profile's risk knobs (so existing assertions still hold) but lets
+# `test_kill_file_blocks_orders` swap in a tmpdir path without monkeypatching
+# the BOT_PROFILES dict.
+def _profile_with_kill(kill_path) -> BotProfile:
+    base = BOT_PROFILES["selective"]
+    return BotProfile(
+        bot_id=base.bot_id,
+        coid_prefix=base.coid_prefix,
+        max_notional_usd=base.max_notional_usd,
+        max_daily_loss_usd=base.max_daily_loss_usd,
+        min_edge_cents=base.min_edge_cents,
+        kill_file=kill_path,
+    )
+
+MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_usd
+MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_usd
 from src.positions import PositionSnapshot
 
 
@@ -70,7 +86,7 @@ def make_row(
 def stub_snapshot(monkeypatch, snap: PositionSnapshot | None) -> None:
     """Force executor.snapshot to return `snap`. Use to isolate cap logic
     from the snapshot's own data-source plumbing."""
-    monkeypatch.setattr("src.executor.snapshot", lambda conn, trader: snap)
+    monkeypatch.setattr("src.executor.snapshot", lambda conn, trader, **_: snap)
 
 
 def test_dry_run_records_intent_no_post(db):
@@ -93,11 +109,11 @@ def test_dry_run_records_intent_no_post(db):
 
 def test_min_edge_floor_blocks_small_edges(db):
     ex = Executor(db, trader=None, live=False)
-    # Gross 5c, net ~3c after 2c fee — below MIN_EDGE_CENTS (8c, net).
+    # Gross 5c, net ~3c after 2c fee — below the selective profile's 8c floor.
     row = make_row(model_prob=0.30, yes_ask=0.25, yes_bid=0.20)
     d = ex.handle_poll([row])
     assert d.placed is False
-    assert "MIN_EDGE_CENTS" in d.reason
+    assert "min_edge_cents" in d.reason
 
 
 def test_time_to_close_guard_blocks_near_settle(db):
@@ -111,11 +127,10 @@ def test_time_to_close_guard_blocks_near_settle(db):
     assert "too close to settle" in d.reason
 
 
-def test_kill_file_blocks_orders(db, tmp_path, monkeypatch):
+def test_kill_file_blocks_orders(db, tmp_path):
     kill = tmp_path / ".kill"
-    monkeypatch.setattr("src.executor.KILL_FILE", kill)
     kill.touch()
-    ex = Executor(db, trader=None, live=False)
+    ex = Executor(db, trader=None, live=False, profile=_profile_with_kill(kill))
     row = make_row(model_prob=0.80, yes_ask=0.25, yes_bid=0.20)
     d = ex.handle_poll([row])
     assert d.placed is False

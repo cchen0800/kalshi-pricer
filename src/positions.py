@@ -2,16 +2,35 @@
 
 Source of truth for the live executor's risk caps. Joins:
 
-  - DB `intended_orders` (mode='live', status='submitted') — bot's order ledger
-  - Kalshi `/portfolio/settlements`                       — settlement state + P&L
+  - DB `intended_orders` (mode='live', this DB belongs to one bot) — used
+    to attribute Kalshi fills to this bot via `kalshi_order_id`, and as a
+    short in-flight overlay for orders just submitted that haven't appeared
+    in /portfolio/fills yet.
+  - Kalshi `/portfolio/fills`         — authoritative fill data (count, price, fee)
+  - Kalshi `/portfolio/settlements`   — settlement direction (yes/no) only
 
-Deliberately scoped to bot-originated trades. The user may manually trade other
-tickers (or even the same KXBTCD markets) on the same Kalshi account; those
-do NOT consume the bot's $30 budget.
+Per-bot scoping. Each bot has its own DB; only fills whose `order_id` matches
+an intent in this DB (or whose `client_order_id` carries this bot's COID
+prefix) are this bot's. Sibling bots, or the user's manual trades on the same
+market on the same Kalshi account, do NOT contaminate this bot's accounting.
 
-Fail-closed: if `trader` is set but the Kalshi call fails, `snapshot()` returns
-`None`. The caller (executor) MUST refuse to place new orders in that case —
-we'd rather miss a trade than open uncapped exposure.
+Critically: the `revenue` / `*_total_cost_dollars` / `fee_cost` fields on a
+settlement record are ACCOUNT-LEVEL — they include every fill on the account
+in that market, regardless of which bot or human placed it. Using them
+directly would lump multi-bot or manual-trade P&L into this bot's daily-loss
+kill switch. We use the settlement only for direction (yes/no won), then
+recompute payout against this bot's own filled count.
+
+Fail-closed: if either Kalshi call fails, `snapshot()` returns None. The
+executor MUST refuse to place new orders in that case.
+
+Asymmetric overlay (the part the audit caught): a SELL intent that hasn't
+yet produced a fill is NOT subtracted from open positions. Pre-fix, a SELL
+that rested at the bid and got TTL-canceled was counted as fully filled,
+under-reporting open notional and admitting BUYs past the cap. Now SELLs
+only reduce position via confirmed fills. BUY intents that haven't yet
+produced a fill are still counted (as in-flight exposure) for the duration
+of `IN_FLIGHT_WINDOW_S`, which is a fail-closed direction.
 """
 
 from __future__ import annotations
@@ -19,6 +38,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
 from typing import Any
@@ -26,6 +46,26 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger("positions")
+
+# How long to treat a submitted intent as in-flight exposure when no matching
+# fill has appeared. The TTL cancel runs at 3s after place; Kalshi fill
+# propagation is typically sub-second; we pad generously to absorb brief
+# /portfolio/fills outages or pagination races. After this window an unsynced
+# intent is presumed canceled (conservative — true exposure is at most what
+# the fills API now reports).
+IN_FLIGHT_WINDOW_S = 180.0
+
+
+@dataclass
+class _MarketAgg:
+    buy_count: int = 0
+    buy_cost_usd: float = 0.0           # Σ fill_price × count over all buys for this bot
+    sell_count: int = 0
+    sell_revenue_usd: float = 0.0       # Σ fill_price × count over all sells
+    fees_usd: float = 0.0               # Σ fee_cost over all fills (lifetime)
+    sell_count_today: int = 0
+    sell_revenue_today_usd: float = 0.0
+    fees_today_usd: float = 0.0         # fees on TODAY's fills only (any side)
 
 
 @dataclass
@@ -66,79 +106,183 @@ def _f(x: Any) -> float:
     return float(x)
 
 
-def snapshot(conn: sqlite3.Connection, trader: Any | None) -> PositionSnapshot | None:
-    """Return the bot's current risk snapshot, or None to signal fail-closed.
+def snapshot(
+    conn: sqlite3.Connection,
+    trader: Any | None,
+    *,
+    bot_coid_prefix: str | None = None,
+    in_flight_window_s: float = IN_FLIGHT_WINDOW_S,
+) -> PositionSnapshot | None:
+    """Return the bot's risk snapshot, or None to fail-closed.
 
-    `trader=None` → empty snapshot (the dry-run path; nothing live to read).
-    `trader` set but Kalshi unreachable → None (live caller must refuse to trade).
+    `trader=None` → empty snapshot (dry-run path; nothing live to read).
+    `trader` set but Kalshi unreachable on either call → None.
+
+    Scoping:
+      - This DB's intents define `bot_order_ids` (kalshi_order_id known).
+      - `bot_coid_prefix`, if given, also matches fills by client_order_id.
+        Pass it from the executor (`profile.coid_prefix`) to close the
+        POST-before-DB-record race: a fill arrives at Kalshi tagged with
+        our COID before we've finished writing the intent row.
     """
     if trader is None:
         return PositionSnapshot.empty()
 
-    # Direct call (not via trade_history._fetch_settlements which swallows
-    # errors and returns []). Risk-critical paths must distinguish "no data"
-    # from "data unavailable" — the latter has to fail closed.
     try:
-        data = trader._request("GET", "/portfolio/settlements", params={"limit": 200})
-        settlements = data.get("settlements", []) or []
+        sett_data = trader._request("GET", "/portfolio/settlements", params={"limit": 200})
+        settlements = sett_data.get("settlements", []) or []
     except Exception:
         log.exception("snapshot: settlements fetch failed; failing closed")
         return None
 
+    try:
+        fills_data = trader._request("GET", "/portfolio/fills", params={"limit": 200})
+        all_fills = fills_data.get("fills", []) or []
+    except Exception:
+        log.exception("snapshot: fills fetch failed; failing closed")
+        return None
+
     sett_by_market: dict[str, dict] = {}
     for s in settlements:
-        mt = s.get("ticker")
+        mt = s.get("ticker") or s.get("market_ticker")
         if mt:
             sett_by_market[mt] = s
 
-    midnight_ms = _midnight_et_ms()
-    # Aggregate buys (count, dollar cost) and sells (count) per (market, side)
-    # for unsettled markets. open_notional is the cost basis of the *remaining*
-    # net long, not the signed sum of limit_price*count — which would leave
-    # ghost capital behind whenever a position was bought high then sold low,
-    # eventually locking the bot out of MAX_NOTIONAL_USD with zero open contracts.
-    buys: dict[tuple[str, str], tuple[int, float]] = {}
-    sells: dict[tuple[str, str], int] = {}
-    settled_pnl_by_market: dict[str, float] = {}
-
-    for market, side, action, count, limit_cents in conn.execute(
-        "SELECT market_ticker, side, action, count, limit_price_cents "
-        "FROM intended_orders WHERE mode='live' AND status='submitted'"
+    bot_order_ids: set[str] = set()
+    for (oid,) in conn.execute(
+        "SELECT kalshi_order_id FROM intended_orders "
+        "WHERE mode='live' AND kalshi_order_id IS NOT NULL"
     ):
-        sett = sett_by_market.get(market)
-        if sett is not None:
-            # Settled — exclude from open positions; record today's P&L once per market.
-            if market in settled_pnl_by_market:
-                continue
-            settled_ms = _iso_to_ms(sett.get("settled_time"))
-            if settled_ms is None or settled_ms < midnight_ms:
-                continue
-            revenue_usd = _f(sett.get("revenue", 0)) / 100.0
-            cost_usd = _f(sett.get("yes_total_cost_dollars")) + _f(sett.get("no_total_cost_dollars"))
-            fee_usd = _f(sett.get("fee_cost"))
-            settled_pnl_by_market[market] = revenue_usd - cost_usd - fee_usd
+        bot_order_ids.add(oid)
+
+    def _is_bot_fill(f: dict) -> bool:
+        oid = f.get("order_id")
+        if oid and oid in bot_order_ids:
+            return True
+        if bot_coid_prefix:
+            coid = f.get("client_order_id") or ""
+            if coid.startswith(bot_coid_prefix):
+                return True
+        return False
+
+    midnight_ms = _midnight_et_ms()
+
+    market_state: dict[tuple[str, str], _MarketAgg] = {}
+    fills_oids: set[str] = set()
+    for f in all_fills:
+        if not _is_bot_fill(f):
             continue
+        market = f.get("ticker") or f.get("market_ticker") or ""
+        if not market:
+            continue
+        side = f.get("side") or "yes"
+        action = f.get("action") or ""
+        count = int(round(_f(f.get("count_fp") or f.get("count"))))
+        if count <= 0:
+            continue
+        price_per = _f(
+            f.get("yes_price_dollars") if side == "yes"
+            else f.get("no_price_dollars")
+        )
+        fee = _f(f.get("fee_cost"))
+        oid = f.get("order_id")
+        if oid:
+            fills_oids.add(oid)
 
-        key = (market, side)
+        ts_ms = _iso_to_ms(f.get("created_time"))
+        is_today = ts_ms is not None and ts_ms >= midnight_ms
+
+        agg = market_state.setdefault((market, side), _MarketAgg())
         if action == "buy":
-            cnt, cost = buys.get(key, (0, 0.0))
-            buys[key] = (cnt + count, cost + count * (limit_cents / 100.0))
-        else:
-            sells[key] = sells.get(key, 0) + count
+            agg.buy_count += count
+            agg.buy_cost_usd += count * price_per
+            agg.fees_usd += fee
+            if is_today:
+                agg.fees_today_usd += fee
+        elif action == "sell":
+            agg.sell_count += count
+            agg.sell_revenue_usd += count * price_per
+            agg.fees_usd += fee
+            if is_today:
+                agg.sell_count_today += count
+                agg.sell_revenue_today_usd += count * price_per
+                agg.fees_today_usd += fee
 
+    # In-flight overlay: BUY intents recently submitted that haven't yet
+    # produced a fill (Kalshi propagation lag, or never will because they
+    # rested past the TTL cancel). NOT applied to SELLs — see module docstring.
+    cutoff_ms = int(time.time() * 1000) - int(in_flight_window_s * 1000)
+    in_flight_buys: dict[tuple[str, str], tuple[int, float]] = {}
+    for market, side, count, limit_cents, oid in conn.execute(
+        "SELECT market_ticker, side, count, limit_price_cents, kalshi_order_id "
+        "FROM intended_orders "
+        "WHERE mode='live' AND status IN ('submitted', 'pending') "
+        "AND action='buy' AND ts_ms >= ?",
+        (cutoff_ms,),
+    ):
+        if oid and oid in fills_oids:
+            continue                       # fills already account for it
+        if market in sett_by_market:
+            continue                       # market settled; intent moot
+        key = (market, side)
+        cnt, cost = in_flight_buys.get(key, (0, 0.0))
+        in_flight_buys[key] = (cnt + count, cost + count * (limit_cents / 100.0))
+
+    # ---- open positions / notional ----
     open_by_market: dict[tuple[str, str], int] = {}
     open_notional_usd = 0.0
-    for key, (buy_cnt, buy_cost) in buys.items():
-        net_count = buy_cnt - sells.get(key, 0)
-        if net_count <= 0:
+    for key, agg in market_state.items():
+        market, _side = key
+        if market in sett_by_market:
+            continue                       # settled markets carry no live exposure
+        net = agg.buy_count - agg.sell_count
+        if net <= 0:
             continue
-        avg_buy_price = buy_cost / buy_cnt
-        open_by_market[key] = net_count
-        open_notional_usd += net_count * avg_buy_price
+        avg_buy_price = agg.buy_cost_usd / agg.buy_count if agg.buy_count else 0.0
+        open_by_market[key] = net
+        open_notional_usd += net * avg_buy_price
+    for key, (cnt, cost) in in_flight_buys.items():
+        open_by_market[key] = open_by_market.get(key, 0) + cnt
+        open_notional_usd += cost
+
+    # ---- realized P&L today ----
+    # Per-bot, never read settlement.cash_delta directly. Three components:
+    #   (a) settled today and bot held position: payout - cost - fees
+    #   (b) unsettled but partial-closed today: sell_revenue_today - sells × VWAP_buy - fees_today
+    #   (c) settled today and bot DIDN'T hold (no fills) → 0
+    realized_pnl_usd = 0.0
+    for key, agg in market_state.items():
+        market, side = key
+        sett = sett_by_market.get(market)
+        if sett is not None:
+            settled_ms = _iso_to_ms(sett.get("settled_time"))
+            if settled_ms is None or settled_ms < midnight_ms:
+                continue                   # settled before today
+            settled_yes = (sett.get("market_result") == "yes")
+            net_at_settle = max(0, agg.buy_count - agg.sell_count)
+            wins = (
+                (side == "yes" and settled_yes) or (side == "no" and not settled_yes)
+            )
+            payout = (net_at_settle * 1.0) if wins else 0.0
+            pnl = (
+                agg.sell_revenue_usd + payout - agg.buy_cost_usd - agg.fees_usd
+            )
+            realized_pnl_usd += pnl
+        else:
+            if agg.sell_count_today <= 0 or agg.buy_count <= 0:
+                continue
+            avg_buy_price = agg.buy_cost_usd / agg.buy_count
+            cost_basis_of_sells = agg.sell_count_today * avg_buy_price
+            pnl_today = (
+                agg.sell_revenue_today_usd
+                - cost_basis_of_sells
+                - agg.fees_today_usd
+            )
+            realized_pnl_usd += pnl_today
 
     return PositionSnapshot(
         open_notional_usd=open_notional_usd,
-        realized_pnl_today_usd=sum(settled_pnl_by_market.values()),
+        realized_pnl_today_usd=realized_pnl_usd,
         open_contracts_by_market=open_by_market,
     )
 
