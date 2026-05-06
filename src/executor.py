@@ -31,7 +31,7 @@ from pathlib import Path
 import httpx
 
 from src.db import PollRow
-from src.engine import actionable_edge
+from src.engine import LEGACY_POLICY, SidePolicy, actionable_edge
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramNotifier
 from src.positions import snapshot
@@ -57,6 +57,12 @@ def _md_escape(s: str) -> str:
 MAX_CONTRACTS_PER_ORDER = 5
 MAX_CONTRACTS_PER_STRIKE = 10
 MAX_ORDERS_PER_MINUTE = 4
+MAX_ORDERS_PER_POLL = 3           # PR #6: place up to K candidates per poll cycle
+                                  # (single-poll cap; rate limit and notional cap
+                                  # still bind across polls). At K>1 we mutate a
+                                  # working copy of the snapshot between tickets
+                                  # so subsequent candidates see post-prior-fill
+                                  # notional + per-strike held counts.
 MIN_MINUTES_TO_CLOSE = 0.25       # 15s execution buffer; the path-dependent
                                   # pricer specifically models T<W (averaging-window
                                   # variance collapse + realized-portion lock-in),
@@ -84,22 +90,35 @@ class BotProfile:
     max_daily_loss_usd: float
     min_edge_cents: float         # NET-of-fee edge floor (see engine.actionable_edge)
     kill_file: Path
+    policy: SidePolicy = LEGACY_POLICY  # which sides may be entered/closed
 
 
 BOT_PROFILES: dict[str, BotProfile] = {
-    # Selective: the original BTC bot. Backtest sweep on 6d/27 events shows SELL
-    # t-stat peaks at 8¢; raising past ~9¢ kills SELL signal entirely.
+    # Selective: where the new BUY_NO strategy ships. Backtest on 5d/27 events
+    # showed all BUY_YES variants -EV; SELL-side alpha lives in BUY_NO entries
+    # (see project_calibrated_no_entry_plan). PR #4 wired the executor branch;
+    # PR #5 lowered the edge floor 8 → 3 to harvest the calibrated-SELL EV the
+    # backtest sweep located, with the calibrated mp band gate (in engine.py)
+    # protecting against acting on extreme-tail probabilities the calibrator
+    # is fit on too few samples to estimate accurately.
     "selective": BotProfile(
         bot_id="btc-selective",
         coid_prefix="btcp-",      # legacy prefix; do not change (existing live history)
         max_notional_usd=30.0,
         max_daily_loss_usd=30.0,
-        min_edge_cents=8.0,
+        min_edge_cents=3.0,
         kill_file=Path(".kill"),  # legacy
+        policy=SidePolicy(
+            allow_buy_yes=False,
+            allow_buy_no=True,
+            sell_yes_to_close_only=True,
+        ),
     ),
-    # Aggressive: same model + same regime gates, lower edge bar. Trades more
-    # often at thinner expected edge — variance up, EV per trade down. Capped
-    # smaller than selective so a bad day can't drain the whole bankroll.
+    # Aggressive: keeps the legacy BUY_YES policy as the canary running the
+    # pre-PR-#3 strategy. Lets us A/B observe whether the SELL-edge signal
+    # the analysis was based on continues to hold while selective transitions
+    # to BUY_NO. Capped smaller than selective so a bad day can't drain the
+    # whole bankroll.
     "aggressive": BotProfile(
         bot_id="btc-aggressive",
         coid_prefix="btca-",
@@ -107,6 +126,7 @@ BOT_PROFILES: dict[str, BotProfile] = {
         max_daily_loss_usd=10.0,
         min_edge_cents=3.0,
         kill_file=Path(".kill.aggressive"),
+        policy=LEGACY_POLICY,
     ),
 }
 
@@ -140,7 +160,7 @@ KILL_FILE = BOT_PROFILES["selective"].kill_file
 class OrderTicket:
     market_ticker: str
     event_ticker: str
-    side: str                  # 'yes' (we don't trade NO in v0; sell YES instead)
+    side: str                  # 'yes' | 'no'  (BUY_NO is the SELL-edge expression — see PR #4)
     action: str                # 'buy' | 'sell'
     limit_price_cents: int     # 1..99
     count: int
@@ -221,10 +241,13 @@ class Executor:
                 f"too close to settle: T-{rows[0].minutes_left:.1f}min < {MIN_MINUTES_TO_CLOSE}min",
             )
 
-        # Find best candidate.
+        # Find best candidate. Policy (per-bot) decides which sides are even
+        # eligible — engine display + shadow logging still see the raw legacy
+        # view via actionable_edge()'s default arg, so dashboards aren't
+        # distorted by per-bot config.
         candidates: list[tuple[float, PollRow, str, float]] = []
         for r in rows:
-            side, edge = actionable_edge(r)
+            side, edge = actionable_edge(r, self.profile.policy)
             if side == "NONE" or edge < self.profile.min_edge_cents:
                 continue
             candidates.append((edge, r, side, edge))
@@ -232,12 +255,58 @@ class Executor:
             return Decision(False, f"no rows above min_edge_cents={self.profile.min_edge_cents}")
         candidates.sort(key=lambda x: -x[0])
 
+        # Top-K loop: place up to MAX_ORDERS_PER_POLL tickets, mutating a working
+        # snap copy so each subsequent _build_ticket sees the running notional /
+        # per-strike held counts including any tickets we already placed this
+        # poll. The deepcopy isolates us from snap's caller (don't mutate the
+        # real positions snapshot — it's reused by callers further up).
+        import copy
+        working_snap = copy.deepcopy(snap)
+        placed_tickets: list[OrderTicket] = []
+        last_decision: Decision | None = None
         for _, row, side, edge in candidates:
-            ticket = self._build_ticket(row, side, edge, snap)
+            if len(placed_tickets) >= MAX_ORDERS_PER_POLL:
+                break
+            # Re-check rate limit between placements — _place appends to
+            # _order_times each time so the same MAX_ORDERS_PER_MINUTE that
+            # gates across polls also gates within a single high-K poll.
+            now = time.time()
+            while self._order_times and now - self._order_times[0] > 60:
+                self._order_times.popleft()
+            if len(self._order_times) >= MAX_ORDERS_PER_MINUTE:
+                break
+
+            ticket = self._build_ticket(row, side, edge, working_snap)
             if ticket is None:
                 continue
-            return self._place(ticket)
+            decision = self._place(ticket)
+            last_decision = decision
+            if not decision.placed:
+                continue
+            placed_tickets.append(ticket)
 
+            # Update working snap so the NEXT candidate's caps reflect this
+            # placement. Buys add to notional + held; sells reduce held only
+            # (notional was committed when the position was opened).
+            key = (ticket.market_ticker, ticket.side)
+            cur_held = working_snap.open_contracts_by_market.get(key, 0)
+            if ticket.action == "buy":
+                working_snap.open_notional_usd += ticket.notional_usd
+                working_snap.open_contracts_by_market[key] = cur_held + ticket.count
+            else:  # sell
+                working_snap.open_contracts_by_market[key] = max(
+                    0, cur_held - ticket.count
+                )
+
+        if placed_tickets:
+            n = len(placed_tickets)
+            return Decision(
+                True,
+                "dry_run" if not self.live else f"placed {n} ticket(s)",
+                placed_tickets[-1],
+            )
+        if last_decision is not None:
+            return last_decision
         return Decision(False, "all candidates blocked by per-order guards")
 
     def _build_ticket(
@@ -247,15 +316,25 @@ class Executor:
         edge: float,
         snap,
     ) -> OrderTicket | None:
-        # side_label is from actionable_edge: 'BUY_YES' or 'SELL_YES'.
-        # We always trade the YES contract; SELL_YES needs an existing long.
+        # side_label is from actionable_edge. SELL_YES needs an existing long
+        # (closing only). BUY_NO is the canonical fresh-short entry — Kalshi's
+        # API books NO natively (kalshi_trader.place_order side='no'), so we
+        # don't need to synthesize anything from yes_bid.
         if side_label == "BUY_YES":
             action = "buy"
+            ticket_side = "yes"
             if row.yes_ask is None:
                 return None
             limit_cents = int(round(row.yes_ask * 100))
+        elif side_label == "BUY_NO":
+            action = "buy"
+            ticket_side = "no"
+            if row.no_ask is None:
+                return None
+            limit_cents = int(round(row.no_ask * 100))
         elif side_label == "SELL_YES":
             action = "sell"
+            ticket_side = "yes"
             if row.yes_bid is None:
                 return None
             limit_cents = int(round(row.yes_bid * 100))
@@ -270,9 +349,16 @@ class Executor:
         if not (1 <= limit_cents <= 99):
             return None
 
-        # Per-strike concentration cap.
-        held = snap.open_contracts_by_market.get((row.market_ticker, "yes"), 0)
-        room_in_strike = MAX_CONTRACTS_PER_STRIKE - held if action == "buy" else held
+        # Per-strike concentration cap. Tracked per (market, side) — a YES
+        # holding and a NO holding in the same market each consume their own
+        # slot. They're economically opposite, but they each take capital and
+        # we don't want to silently double-stack on either side.
+        held_same_side = snap.open_contracts_by_market.get(
+            (row.market_ticker, ticket_side), 0
+        )
+        room_in_strike = (
+            MAX_CONTRACTS_PER_STRIKE - held_same_side if action == "buy" else held_same_side
+        )
         if room_in_strike <= 0:
             return None
 
@@ -280,6 +366,8 @@ class Executor:
         max_count = min(MAX_CONTRACTS_PER_ORDER, room_in_strike)
 
         # Notional cap (only matters for buys; sells free up notional).
+        # snap.open_notional_usd already aggregates across both YES and NO
+        # holdings so the cap binds the bot's total dollar exposure.
         if action == "buy":
             remaining_notional = self.profile.max_notional_usd - snap.open_notional_usd
             cost_per_contract = limit_cents / 100.0
@@ -295,7 +383,7 @@ class Executor:
         return OrderTicket(
             market_ticker=row.market_ticker,
             event_ticker=row.event_ticker,
-            side="yes",
+            side=ticket_side,
             action=action,
             limit_price_cents=limit_cents,
             count=int(max_count),
@@ -403,7 +491,10 @@ class Executor:
         market = _md_escape(ticket.market_ticker)
         status_md = _md_escape(status)
         bot_md = _md_escape(self.profile.bot_id)
-        side_word = "BUY YES" if ticket.action == "buy" else "SELL YES"
+        if ticket.action == "buy":
+            side_word = "BUY NO" if ticket.side == "no" else "BUY YES"
+        else:
+            side_word = "SELL NO" if ticket.side == "no" else "SELL YES"
         msg = (
             f"*[{mode} {bot_md}] {side_word}* {ticket.count} @ {ticket.limit_price_cents}¢\n"
             f"`{market}`\n"

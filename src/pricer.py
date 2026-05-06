@@ -22,8 +22,20 @@ def years_from_minutes(minutes: float) -> float:
     return minutes / MINUTES_PER_YEAR
 
 
-def prob_above_strike(spot: float, strike: float, sigma: float, minutes_left: float) -> float:
-    """P(S_T > K) under zero-drift lognormal."""
+def prob_above_strike(
+    spot: float,
+    strike: float,
+    sigma: float,
+    minutes_left: float,
+    *,
+    drift_per_year: float = 0.0,
+) -> float:
+    """P(S_T > K) under lognormal with optional log-return drift μ.
+
+    drift_per_year=0.0 (default) recovers the original zero-drift formula and
+    preserves all callers that don't pass a drift. Wired in PR #6C; no
+    estimator in v0 — pass a pinned value if you want it active.
+    """
     if spot <= 0 or strike <= 0:
         raise ValueError("spot and strike must be positive")
     if sigma < 0:
@@ -41,7 +53,7 @@ def prob_above_strike(spot: float, strike: float, sigma: float, minutes_left: fl
 
     T = years_from_minutes(minutes_left)
     vol_t = sigma * math.sqrt(T)
-    d = (math.log(spot / strike) - 0.5 * sigma * sigma * T) / vol_t
+    d = (math.log(spot / strike) + (drift_per_year - 0.5 * sigma * sigma) * T) / vol_t
     return float(norm.cdf(d))
 
 
@@ -62,6 +74,7 @@ def prob_above_strike_path_dependent(
     seconds_to_settlement: float,
     realized_partial_avg: float | None = None,
     averaging_window_seconds: float = 60.0,
+    drift_per_year: float = 0.0,
 ) -> float:
     """P(BRTI time-average over final W seconds > strike).
 
@@ -99,7 +112,12 @@ def prob_above_strike_path_dependent(
     sigma_abs = spot * sigma  # $ per √year
 
     if T >= W:
-        mean = spot
+        # Drift contribution to the time-averaged price over the averaging
+        # window: spot * μ * (T - W/2) / SECONDS_PER_YEAR. The "-W/2" picks
+        # the midpoint of the averaging window as the representative time.
+        # At μ=0 (default) this collapses to the zero-drift mean=spot.
+        T_eff_year = max(0.0, (T - W / 2.0) / SECONDS_PER_YEAR)
+        mean = spot * (1.0 + drift_per_year * T_eff_year)
         tau_years = max(0.0, (T - 2.0 * W / 3.0) / SECONDS_PER_YEAR)
     else:
         w_n = T / W
@@ -110,7 +128,11 @@ def prob_above_strike_path_dependent(
             raise ValueError("realized_partial_avg must be positive")
         else:
             realized = realized_partial_avg
-        mean = w_r * realized + w_n * spot
+        # Inside the averaging window: only the unrealized portion is exposed
+        # to drift. Drift over [0, T] integrated within the average has mean
+        # contribution w_n * spot * μ * (T/2) / SECONDS_PER_YEAR.
+        drift_term = w_n * spot * drift_per_year * (T / 2.0) / SECONDS_PER_YEAR
+        mean = w_r * realized + w_n * spot + drift_term
         tau_years = (w_n * w_n) * T / (3.0 * SECONDS_PER_YEAR)
 
     if tau_years <= 0 or sigma_abs == 0:

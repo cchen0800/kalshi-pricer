@@ -19,10 +19,13 @@ CREATE TABLE IF NOT EXISTS polls (
     sigma           REAL    NOT NULL,
     minutes_left    REAL    NOT NULL,
     model_prob      REAL    NOT NULL,
+    model_prob_calibrated REAL,                       -- isotonic-calibrated model_prob; NULL on legacy rows
     yes_bid         REAL,
     yes_ask         REAL,
     yes_bid_size    REAL,
     yes_ask_size    REAL,
+    no_bid          REAL,                              -- NO-side bid in dollars; needed for BUY_NO entries (PR #4)
+    no_ask          REAL,                              -- NO-side ask in dollars; what BUY_NO would pay
     volume          REAL,
     edge_cents      REAL    NOT NULL,
     proxy_source    TEXT    NOT NULL DEFAULT 'coinbase'
@@ -107,7 +110,8 @@ CREATE TABLE IF NOT EXISTS shadow_signals (
     gate_sigma_passed        INTEGER NOT NULL,       -- 0/1
     gate_dist_passed         INTEGER NOT NULL,
     gate_time_passed         INTEGER NOT NULL,
-    chosen_side              TEXT    NOT NULL,       -- 'BUY_YES' | 'SELL_YES' | 'NONE'
+    gate_mp_band_passed      INTEGER,                -- 0/1; calibrated mp ∈ [0.05, 0.85). NULL on legacy rows.
+    chosen_side              TEXT    NOT NULL,       -- 'BUY_YES' | 'BUY_NO' | 'SELL_YES' | 'NONE'
     chosen_edge_cents        REAL    NOT NULL        -- what actionable_edge() returned
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ts        ON shadow_signals(ts_ms);
@@ -152,6 +156,9 @@ class PollRow:
     yes_ask_size: float | None
     volume: float | None
     edge_cents: float
+    model_prob_calibrated: float | None = None
+    no_bid: float | None = None
+    no_ask: float | None = None
     proxy_source: str = "coinbase"
 
 
@@ -180,6 +187,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ON intended_orders(bot_id, ts_ms)"
     )
 
+    poll_cols = {r[1] for r in conn.execute("PRAGMA table_info(polls)")}
+    if "model_prob_calibrated" not in poll_cols:
+        # Pre-existing rows get NULL — fine, the value is only consumed by
+        # PR #3 onward and the engine reads/writes the new column from now.
+        conn.execute("ALTER TABLE polls ADD COLUMN model_prob_calibrated REAL")
+    if "no_bid" not in poll_cols:
+        conn.execute("ALTER TABLE polls ADD COLUMN no_bid REAL")
+    if "no_ask" not in poll_cols:
+        conn.execute("ALTER TABLE polls ADD COLUMN no_ask REAL")
+
+    shadow_cols = {r[1] for r in conn.execute("PRAGMA table_info(shadow_signals)")}
+    if "gate_mp_band_passed" not in shadow_cols:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN gate_mp_band_passed INTEGER")
+
 
 @contextmanager
 def open_db(db_path: str | Path) -> Iterator[sqlite3.Connection]:
@@ -197,12 +218,12 @@ def insert_polls(conn: sqlite3.Connection, rows: Iterable[PollRow]) -> int:
     sql = """
         INSERT INTO polls (
             ts_ms, event_ticker, market_ticker, strike, spot, sigma, minutes_left,
-            model_prob, yes_bid, yes_ask, yes_bid_size, yes_ask_size, volume,
-            edge_cents, proxy_source
+            model_prob, model_prob_calibrated, yes_bid, yes_ask, yes_bid_size,
+            yes_ask_size, no_bid, no_ask, volume, edge_cents, proxy_source
         ) VALUES (
             :ts_ms, :event_ticker, :market_ticker, :strike, :spot, :sigma, :minutes_left,
-            :model_prob, :yes_bid, :yes_ask, :yes_bid_size, :yes_ask_size, :volume,
-            :edge_cents, :proxy_source
+            :model_prob, :model_prob_calibrated, :yes_bid, :yes_ask, :yes_bid_size,
+            :yes_ask_size, :no_bid, :no_ask, :volume, :edge_cents, :proxy_source
         )
     """
     conn.executemany(sql, [asdict(r) for r in rows])
@@ -228,6 +249,7 @@ class ShadowSignal:
     gate_time_passed: int
     chosen_side: str
     chosen_edge_cents: float
+    gate_mp_band_passed: int | None = None
 
 
 def insert_shadow_signals(conn: sqlite3.Connection, rows: Iterable[ShadowSignal]) -> int:
@@ -238,12 +260,12 @@ def insert_shadow_signals(conn: sqlite3.Connection, rows: Iterable[ShadowSignal]
         INSERT INTO shadow_signals (
             ts_ms, event_ticker, market_ticker, strike, spot, sigma, minutes_left,
             model_prob, yes_bid, yes_ask, buy_edge_net_cents, sell_edge_net_cents,
-            gate_sigma_passed, gate_dist_passed, gate_time_passed,
+            gate_sigma_passed, gate_dist_passed, gate_time_passed, gate_mp_band_passed,
             chosen_side, chosen_edge_cents
         ) VALUES (
             :ts_ms, :event_ticker, :market_ticker, :strike, :spot, :sigma, :minutes_left,
             :model_prob, :yes_bid, :yes_ask, :buy_edge_net_cents, :sell_edge_net_cents,
-            :gate_sigma_passed, :gate_dist_passed, :gate_time_passed,
+            :gate_sigma_passed, :gate_dist_passed, :gate_time_passed, :gate_mp_band_passed,
             :chosen_side, :chosen_edge_cents
         )
     """

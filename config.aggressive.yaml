@@ -5,6 +5,7 @@ vol_window_minutes: 60
 vol_estimator: yang_zhang
 log_level: INFO
 db_path: ./pricer.aggressive.db
+calibrator_path: ./calibrator.json   # shared across profiles — same model, same calibrator
 series: KXBTCD
 kalshi_host: https://api.elections.kalshi.com
 coinbase_api_base: https://api.exchange.coinbase.com

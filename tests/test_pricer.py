@@ -190,3 +190,51 @@ def test_path_dep_invalid_inputs_raise():
             spot=100, strike=100, sigma=0.5, seconds_to_settlement=30,
             realized_partial_avg=-50,
         )
+
+
+# ---- PR #6C: spot drift parameter ----
+
+def test_drift_zero_recovers_zero_drift_formula():
+    base = prob_above_strike(spot=80_000, strike=80_500, sigma=0.5, minutes_left=30)
+    with_zero = prob_above_strike(
+        spot=80_000, strike=80_500, sigma=0.5, minutes_left=30,
+        drift_per_year=0.0,
+    )
+    assert base == pytest.approx(with_zero)
+
+
+def test_positive_drift_raises_above_strike_prob():
+    p_no_drift = prob_above_strike(
+        spot=80_000, strike=80_500, sigma=0.5, minutes_left=30, drift_per_year=0.0,
+    )
+    p_with_drift = prob_above_strike(
+        spot=80_000, strike=80_500, sigma=0.5, minutes_left=30, drift_per_year=0.5,
+    )
+    assert p_with_drift > p_no_drift
+
+
+def test_path_dep_drift_zero_matches_no_kw():
+    p_no_kw = prob_above_strike_path_dependent(
+        spot=80_000, strike=80_500, sigma=0.5, seconds_to_settlement=300,
+    )
+    p_zero = prob_above_strike_path_dependent(
+        spot=80_000, strike=80_500, sigma=0.5, seconds_to_settlement=300,
+        drift_per_year=0.0,
+    )
+    assert p_no_kw == pytest.approx(p_zero)
+
+
+def test_path_dep_drift_shifts_prob_in_expected_direction():
+    p_no = prob_above_strike_path_dependent(
+        spot=80_000, strike=80_500, sigma=0.5, seconds_to_settlement=300,
+        drift_per_year=0.0,
+    )
+    p_pos = prob_above_strike_path_dependent(
+        spot=80_000, strike=80_500, sigma=0.5, seconds_to_settlement=300,
+        drift_per_year=1.0,
+    )
+    p_neg = prob_above_strike_path_dependent(
+        spot=80_000, strike=80_500, sigma=0.5, seconds_to_settlement=300,
+        drift_per_year=-1.0,
+    )
+    assert p_pos > p_no > p_neg

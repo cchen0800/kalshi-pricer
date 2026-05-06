@@ -24,6 +24,9 @@ def load_config(path: str | Path | None = None) -> EngineConfig:
         db_path=str(raw.get("db_path", "./pricer.db")),
         series=str(raw.get("series", "KXBTCD")),
         vol_estimator=str(raw.get("vol_estimator", "yang_zhang")),
+        calibrator_path=str(raw.get("calibrator_path", "./calibrator.json")),
+        match_vol_window_to_horizon=bool(raw.get("match_vol_window_to_horizon", False)),
+        spot_drift_per_year=float(raw.get("spot_drift_per_year", 0.0)),
     )
 
 
