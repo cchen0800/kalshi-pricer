@@ -32,6 +32,10 @@ tightly under normal conditions but can drift several dollars during fast
 moves or exchange-specific events. Treat any apparent edge < ~$10 in BTC terms
 as potentially basis noise rather than mispricing.
 
+## Kalshi API Quirks
+
+The Kalshi API mirrors `sell` fills on the `yes` side. For example, if you place a `sell` order on the `yes` side at 54¢, the resulting fill payload from the `/portfolio/fills` endpoint will report it as a `sell` on the `no` side at 46¢. The pricer and executor logic automatically normalizes these fills back to the `yes` side (e.g., side='yes', price=100-46=54) to ensure local position and risk accounting remain accurate and unbounded position accumulation is prevented.
+
 ## Setup
 
 ```bash
