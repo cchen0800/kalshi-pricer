@@ -943,7 +943,7 @@ const fmtMin = n => {
   const ss = totalSec % 60;
   return mm + ":" + String(ss).padStart(2, "0");
 };
-const strikeLabel = strike => "$" + Math.ceil(strike).toLocaleString() + ' <span class="above">or above</span>';
+const strikeLabel = strike => "above $" + Math.ceil(strike).toLocaleString();
 const yesPill = ask => ask == null
   ? '<span class="pill yes mute">Yes —</span>'
   : '<span class="pill yes">Yes ' + Math.round(ask * 100) + '¢</span>';
@@ -1158,19 +1158,24 @@ const fmtSignedUsd = n => {
 };
 const strikeFromTicker = mt => {
   const last = (mt || "").split("-").pop() || "";
-  return last.startsWith("T") ? "$" + last.slice(1) : last;
+  if (!last.startsWith("T")) return last;
+  const n = parseFloat(last.slice(1));
+  return isNaN(n) ? last : "above $" + Math.ceil(n).toLocaleString();
 };
 const eventLabel = et => {
-  // KXBTCD-26MAY0222 / KXETHD-26MAY0817 → "May 02 22:00"
+  // KXBTCD-26MAY0222 / KXETHD-26MAY0817 → "MAY 02 10 PM"
   const m = (et || "").match(/^KX[A-Z]+-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
   if (!m) return et || "—";
-  return `${m[2]} ${m[3]} ${m[4]}:00`;
+  const h = parseInt(m[4], 10);
+  const h12 = (h % 12) || 12;
+  const ampm = h < 12 ? "AM" : "PM";
+  return `${m[2]} ${m[3]} ${h12} ${ampm}`;
 };
 const fmtTimeEt = ts_ms => {
   const d = new Date(ts_ms);
   // Render in America/New_York; Intl handles DST.
   const opts = { timeZone: "America/New_York", month: "2-digit", day: "2-digit",
-                 hour: "2-digit", minute: "2-digit", hour12: false };
+                 hour: "numeric", minute: "2-digit", hour12: true };
   return new Intl.DateTimeFormat("en-US", opts).format(d);
 };
 
