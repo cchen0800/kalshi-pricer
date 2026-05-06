@@ -451,28 +451,36 @@
     font-size: 12px;
   }
 
-  /* ==== Mobile (≤720px) ====
-   * Tables become stacked cards via :nth-child ::before labels — no JS change.
-   * The ::before label name must mirror the desktop <th> text exactly.
+  /* ==== Mobile (≤720px) =====================================================
+   * Each <tr> becomes a packed CSS-grid card. Column-area names mirror the
+   * desktop <th> order — change the HTML column count and you must remap the
+   * grid-area assignments below. Packs 9-to-11 fields per row into 3-4 visual
+   * lines instead of stacking each <td> on its own line.
    */
   @media (max-width: 720px) {
     body { font-size: 14px; }
 
     /* Hero — compact */
-    .hero { padding: 18px 16px 16px; }
-    .hero-price { font-size: 32px; }
-    .hero-sub { font-size: 13px; }
+    .hero { padding: 14px 16px 12px; }
+    .live-tag { margin-bottom: 6px; font-size: 10.5px; }
+    .hero-price { font-size: 30px; line-height: 1.1; }
+    .hero-sub { font-size: 13px; line-height: 1.35; }
     .hero-metrics {
-      gap: 14px 22px;
-      margin-top: 14px;
+      gap: 10px 18px;
+      margin-top: 12px;
       display: grid;
       grid-template-columns: 1fr 1fr;
     }
-    .metric-value { font-size: 14px; }
+    .metric-label { font-size: 9.5px; }
+    .metric-value { font-size: 13.5px; }
 
-    /* Tabs — horizontal scroll (in case more get added) */
+    /* Asset switcher — flatter, smaller pills */
+    .asset-switcher { padding: 10px 16px 0; gap: 6px; }
+    .asset-switcher a { padding: 6px 14px; font-size: 11.5px; }
+
+    /* Tabs — sticky to top, horizontal scroll if more get added */
     .tabs {
-      padding: 0 12px;
+      padding: 0 8px;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
@@ -480,136 +488,178 @@
     .tabs::-webkit-scrollbar { display: none; }
     .tab { padding: 12px 14px; font-size: 13px; flex-shrink: 0; }
 
-    /* Filter row scrolls horizontally so the chips don't wrap into 3 lines */
+    /* Filters — sticky directly under the tabs row, horizontal scroll */
     .filters {
-      padding: 12px 16px;
+      padding: 10px 16px;
       flex-wrap: nowrap;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
+      position: sticky;
+      top: 44px;
+      z-index: 4;
+      background: var(--bg);
+      border-bottom: 1px solid var(--hairline);
     }
     .filters::-webkit-scrollbar { display: none; }
     .filters .label, .filter-btn { flex-shrink: 0; }
+    .filter-btn { padding: 6px 12px; font-size: 12px; }
+    .filter-btn .count { display: none; }   /* counts add clutter on phones */
 
-    /* Table → cards. Each <tr> becomes a card; each <td> a label/value row. */
-    .grid, .grid tbody, .grid tr, .grid td { display: block; width: 100%; }
+    /* Common: <table> → block; <tr> → grid card */
+    .grid, .grid tbody { display: block; width: 100%; }
     .grid thead { display: none; }
     .grid tr {
+      display: grid;
+      width: 100%;
       padding: 12px 16px;
-      border-bottom: 1px solid var(--hairline-strong);
+      gap: 5px 12px;
+      border-bottom: 1px solid var(--hairline);
+      align-items: center;
       position: relative;
     }
     .grid td {
-      text-align: left;
-      padding: 4px 0;
-      border: none;
-      font-size: 13px;
       display: flex;
-      justify-content: space-between;
       align-items: center;
-      gap: 12px;
+      gap: 5px;
+      padding: 0;
+      border: none;
+      font-size: 13.5px;
+      text-align: left;
+      min-width: 0;
     }
-    .grid td:first-child, .grid td:last-child { padding-left: 0; padding-right: 0; }
-    .grid td.pill-cell { justify-content: space-between; text-align: left; }
+    /* Default: no ::before — turned on selectively per-cell below. */
+    .grid td::before { content: none; }
+    .grid td.pill-cell { justify-content: flex-start; }
 
-    /* Generic ::before label, overridden per-grid below. */
-    .grid td::before {
-      content: attr(data-mobile-label);
-      color: var(--fg-3);
-      font-weight: 500;
-      font-size: 10.5px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      flex-shrink: 0;
-    }
-
-    /* Side-stripe via border instead of inset box-shadow (which breaks
-       once we drop table layout). */
+    /* Side stripe via border-left (the inset box-shadow needed table layout). */
     .grid tr.buy  { border-left: 3px solid var(--green); padding-left: 13px; }
     .grid tr.sell { border-left: 3px solid var(--red);   padding-left: 13px; }
     .grid tr.buy td:first-child, .grid tr.sell td:first-child { box-shadow: none; }
-    .grid tr.atm td { background: transparent; } /* row-bg looks weird in card mode */
-    .grid tr.atm { background: rgba(255, 255, 255, 0.025); }
+    .grid tr.atm td { background: transparent; }
+    .grid tr.atm    { background: rgba(255, 255, 255, 0.025); }
+    .grid tr.cold   { opacity: 0.55; }
+    .grid tbody tr:hover td { background: transparent; }
 
-    /* ---- Live grid columns (#grid):
-       1 Strike | 2 Market | 3 Model | 4 Yes | 5 No | 6 Edge | 7 Action | 8 Size | 9 Ticker */
-    #grid td:nth-child(1) {
-      font-size: 15px;
-      font-weight: 700;
-      padding-bottom: 8px;
-      margin-bottom: 4px;
-      border-bottom: 1px solid var(--hairline);
-      display: block;  /* let strike-label render naturally; no ::before */
-    }
-    #grid td:nth-child(1)::before { content: none; }
-    #grid td:nth-child(2)::before { content: "Chance"; }
-    #grid td:nth-child(3)::before { content: "Model"; }
-    #grid td:nth-child(4)::before { content: "Yes"; }
-    #grid td:nth-child(5)::before { content: "No"; }
-    #grid td:nth-child(6)::before { content: "Edge"; }
-    #grid td:nth-child(7)::before { content: "Action"; }
-    #grid td:nth-child(8)::before { content: "Size"; }
-    /* Ticker spans full width as muted footer line */
-    #grid td:nth-child(9) {
-      margin-top: 6px;
-      padding-top: 6px;
-      border-top: 1px solid var(--hairline);
-      display: block;
-      font-size: 10.5px;
-    }
-    #grid td:nth-child(9)::before { content: none; }
+    /* Smaller pills on phones */
+    .pill { min-width: 50px; padding: 3px 9px; font-size: 11.5px; }
+
     .strike-label { font-size: 15px; }
-    .strike-label .above { font-size: 12px; }
+    .strike-label .above { font-size: 11.5px; color: var(--fg-3); }
 
-    /* ---- Trades summary — two columns instead of auto-fit (cleaner on phones) */
+    /* ---- Live grid (#grid) ----------------------------------------------
+       <th> order: 1 strike | 2 chance | 3 model | 4 yes | 5 no |
+                   6 edge   | 7 action | 8 size  | 9 ticker
+       Card:
+         [ strike ............................. ] [ action ]
+         [ yes-pill ] [ no-pill ]                   [ edge  ]
+         [ Mkt 70% ] [ Mdl 76% ]                    [ × 145 ]
+         [ ticker (full-width muted mono) ............... ]
+    */
+    #grid tr {
+      grid-template-columns: minmax(0, auto) minmax(0, auto) minmax(0, 1fr);
+      grid-template-areas:
+        "strike  strike  action"
+        "yes     no      edge"
+        "chance  model   size"
+        "ticker  ticker  ticker";
+    }
+    #grid td:nth-child(1) { grid-area: strike; font-size: 15px; font-weight: 700; }
+    #grid td:nth-child(2) { grid-area: chance; color: var(--fg-2); font-size: 12.5px; }
+    #grid td:nth-child(3) { grid-area: model;  color: var(--fg-2); font-size: 12.5px; }
+    #grid td:nth-child(4) { grid-area: yes; }
+    #grid td:nth-child(5) { grid-area: no; }
+    #grid td:nth-child(6) { grid-area: edge;   justify-content: flex-end; font-weight: 600; }
+    #grid td:nth-child(7) { grid-area: action; justify-content: flex-end; font-weight: 600; font-size: 13px; }
+    #grid td:nth-child(8) { grid-area: size;   justify-content: flex-end; color: var(--fg-3); font-size: 12px; }
+    #grid td:nth-child(9) {
+      grid-area: ticker;
+      display: block;
+      color: var(--fg-3);
+      font-size: 10.5px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      padding-top: 6px;
+      margin-top: 2px;
+      border-top: 1px solid var(--hairline);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Tiny inline labels on the secondary metric cells. */
+    #grid td:nth-child(2)::before,
+    #grid td:nth-child(3)::before,
+    #grid td:nth-child(8)::before {
+      color: var(--fg-3);
+      font-size: 9.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    #grid td:nth-child(2)::before { content: "Mkt"; }
+    #grid td:nth-child(3)::before { content: "Mdl"; }
+    #grid td:nth-child(8)::before { content: "Size"; }
+    /* Dim the action cell when nothing's flagged so it doesn't compete with the strike. */
+    #grid td.action.NONE { opacity: 0.35; }
+
+    /* ---- Trades summary — 2-col grid ------------------------------------- */
     .trades-summary {
       grid-template-columns: 1fr 1fr;
-      padding: 16px;
+      padding: 12px 16px;
       gap: 8px;
     }
-    .trades-summary .stat { padding: 12px 14px; }
-    .trades-summary .value { font-size: 16px; }
-    .trades-summary .label { font-size: 10px; }
+    .trades-summary .stat { padding: 11px 13px; }
+    .trades-summary .label { font-size: 9.5px; }
+    .trades-summary .value { font-size: 15px; }
 
-    /* ---- Trades grid columns (.trades-grid):
-       1 When | 2 Event | 3 Strike | 4 Side | 5 × | 6 Limit/Fill | 7 Edge |
-       8 Notional | 9 Status | 10 Outcome | 11 P&L */
-    .trades-grid td:nth-child(1) {
-      font-size: 11px;
-      color: var(--fg-3);
-      padding-bottom: 4px;
-      display: block;
+    /* ---- Trades grid (.trades-grid) -------------------------------------
+       <th> order: 1 when | 2 event | 3 strike | 4 side | 5 qty |
+                   6 limit/fill | 7 edge | 8 notional | 9 status |
+                   10 outcome | 11 pnl
+       Card:
+         [ strike (+ ticker child div) .... ]   [outcome] [pnl]
+         [ side  × qty   limit→fill ]                     [edge]
+         [ when · event ........... ]    [status]   [notional]
+    */
+    .trades-grid tr {
+      grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      grid-template-areas:
+        "strike   strike  strike  outcome  pnl"
+        "side     qty     price   edge     edge"
+        "when     event   event   status   notional";
+      row-gap: 5px;
+      column-gap: 8px;
+      align-items: center;
     }
-    .trades-grid td:nth-child(1)::before { content: none; }
-    .trades-grid td:nth-child(2)::before { content: "Event"; }
-    .trades-grid td:nth-child(3)::before { content: "Strike"; }
-    .trades-grid td:nth-child(4)::before { content: "Side"; }
-    .trades-grid td:nth-child(5)::before { content: "Qty"; }
-    .trades-grid td:nth-child(6)::before { content: "Limit / Fill"; }
-    .trades-grid td:nth-child(7)::before { content: "Edge"; }
-    .trades-grid td:nth-child(8)::before { content: "Notional"; }
-    .trades-grid td:nth-child(9)::before { content: "Status"; }
-    .trades-grid td:nth-child(10)::before { content: "Outcome"; }
-    .trades-grid td:nth-child(11) {
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--hairline);
+    .trades-grid td:nth-child(1)  { grid-area: when;     color: var(--fg-3); font-size: 11px; }
+    .trades-grid td:nth-child(2)  { grid-area: event;    color: var(--fg-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trades-grid td:nth-child(3)  {
+      grid-area: strike;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
       font-size: 14px;
-      font-weight: 600;
+      font-weight: 700;
     }
-    .trades-grid td:nth-child(11)::before {
-      content: "P&L";
-      font-size: 11px;
-    }
-    /* Wrap nested ticker mini-line under strike */
-    .trades-grid .ticker-mini { margin-top: 4px; }
-    /* Trades-tab "no rows" placeholder spans full card width */
+    .trades-grid td:nth-child(4)  { grid-area: side;     font-weight: 600; font-size: 13px; white-space: nowrap; }
+    .trades-grid td:nth-child(5)  { grid-area: qty;      color: var(--fg-2); font-size: 12.5px; }
+    .trades-grid td:nth-child(5)::before { content: "×"; color: var(--fg-3); margin-right: 1px; }
+    .trades-grid td:nth-child(6)  { grid-area: price;    font-size: 12.5px; white-space: nowrap; }
+    .trades-grid td:nth-child(7)  { grid-area: edge;     justify-content: flex-end; font-weight: 600; }
+    .trades-grid td:nth-child(8)  { grid-area: notional; justify-content: flex-end; color: var(--fg-3); font-size: 11px; white-space: nowrap; }
+    .trades-grid td:nth-child(9)  { grid-area: status;   justify-content: flex-end; color: var(--fg-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .trades-grid td:nth-child(10) { grid-area: outcome;  justify-content: flex-end; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+    .trades-grid td:nth-child(11) { grid-area: pnl;      justify-content: flex-end; font-weight: 700; font-size: 14px; }
+
+    .trades-grid .ticker-mini { margin-top: 0; }
+
+    /* "No rows" placeholder collapses the grid to one full-width centered cell. */
     .trades-grid tbody tr td[colspan] {
-      display: block;
+      grid-column: 1 / -1;
+      justify-content: center;
       text-align: center;
       padding: 24px 16px;
     }
-    .trades-grid tbody tr td[colspan]::before { content: none; }
 
     /* Footer + guide */
     .footer { margin: 20px 16px; font-size: 11.5px; }
@@ -620,18 +670,58 @@
     .guide table th, .guide table td { padding: 8px 10px; font-size: 13px; }
   }
 
-  /* Tighter still on very small phones */
+  /* Tighter still on very small phones (≤380px). Drop to a 2-col grid so
+     pills, edge, and action don't get squeezed. */
   @media (max-width: 380px) {
     .hero-price { font-size: 28px; }
     .hero-metrics { grid-template-columns: 1fr; gap: 10px; }
     .tab { padding: 12px 10px; }
     .trades-summary { grid-template-columns: 1fr; }
+
+    #grid tr {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "strike  action"
+        "yes     edge"
+        "no      size"
+        "chance  model"
+        "ticker  ticker";
+    }
+    #grid td:nth-child(2) { justify-content: flex-start; }
+    #grid td:nth-child(3) { justify-content: flex-end; }
+
+    .trades-grid tr {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "strike   pnl"
+        "side     outcome"
+        "qty      edge"
+        "price    notional"
+        "when     status"
+        "event    event";
+      row-gap: 4px;
+    }
   }
 
-  /* Respect notch/safe-area on iOS */
+  /* Respect notch/safe-area on iOS (landscape notched devices) */
   @supports (padding: max(0px)) {
     .hero { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
     .tabs { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+    .asset-switcher,
+    .filters,
+    .trades-summary,
+    .footer {
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+    .grid tr {
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+    .grid tr.buy, .grid tr.sell {
+      padding-left: max(13px, calc(env(safe-area-inset-left) - 3px));
+    }
+    body { padding-bottom: env(safe-area-inset-bottom); }
   }
 
   /* Top-level asset switcher: navigates between sibling dashboards. */
@@ -663,7 +753,6 @@
     border-color: transparent;
   }
   .asset-switcher a.active:hover { color: #fff; }
-  @media (max-width: 720px) { .asset-switcher { padding: 12px 16px 0; } }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.min.js"></script>
 </head>
