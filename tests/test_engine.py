@@ -312,12 +312,24 @@ def test_buy_no_emits_when_allowed_and_profitable():
     assert edge == pytest.approx(45.0 - expected_fee)
 
 
-def test_buy_no_blocked_by_regime_gates_same_as_buy_yes():
-    """Both BUY sides share _passes_buy_gates — low σ blocks both."""
-    low_sigma = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25,
-                         no_ask=0.25, sigma=0.20)
+def test_buy_no_passes_at_sigma_below_buy_yes_floor():
+    """BUY_NO uses a lower σ floor than BUY_YES (0.20 vs 0.50). σ=0.30 sits
+    in the band where BUY_YES is gated out but BUY_NO should still fire —
+    that's the entire point of the side-aware gate."""
+    row = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25,
+                   no_ask=0.25, sigma=0.30)
     pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=False)
-    side, _ = actionable_edge(low_sigma, pol)
+    side, _ = actionable_edge(row, pol)
+    assert side == "BUY_NO"
+
+
+def test_buy_no_blocked_below_its_own_sigma_floor():
+    """σ=0.10 is below BUY_NO_GATE_MIN_SIGMA (0.20) — calm-market garbage
+    cutoff still applies even on the NO side."""
+    row = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25,
+                   no_ask=0.25, sigma=0.10)
+    pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=False)
+    side, _ = actionable_edge(row, pol)
     assert side == "NONE"
 
 

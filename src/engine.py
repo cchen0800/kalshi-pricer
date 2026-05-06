@@ -178,12 +178,23 @@ def build_poll_rows(
 
 
 # ---- Regime gates for opening new long positions ----
-# Identified from the first 33 live trades (May 2-4, 2026): wins concentrated
-# at σ>55% / strike >0.4% from spot / T>30min, losses concentrated at σ<25%
-# / ATM (±0.1%) / T<15min. Cutoffs sit slightly inside each observed
-# good-regime boundary. SELLs (closing existing longs) are NOT gated — we
-# always want to be able to realize a positive sell edge to exit cleanly.
-BUY_GATE_MIN_SIGMA = 0.50          # 60-min annualized realized vol
+# BUY_YES floor: identified from the first 33 live trades (May 2-4, 2026):
+# wins concentrated at σ>55% / strike >0.4% from spot / T>30min, losses
+# concentrated at σ<25% / ATM (±0.1%) / T<15min.
+#
+# BUY_NO floor: the bucketed backtest (scripts/backtest_lowvol_regime.py) on
+# 27 settled events shows BUY_NO is +12.8¢/trade across σ<0.50 (n=134, 26
+# events) but only +7.3¢/trade at σ≥0.50 (n=40, 5 events). Applying the
+# BUY_YES floor to BUY_NO filters out the band where the alpha lives. The
+# 0.20 floor is a "calm-market garbage" cutoff — well below the band where
+# BUY_NO has shown positive EV — and is intentionally separate from the
+# BUY_YES floor so this knob can move independently.
+#
+# SELLs (closing existing longs) are NOT gated — we always want to be able
+# to realize a positive sell edge to exit cleanly.
+BUY_YES_GATE_MIN_SIGMA = 0.50      # 60-min annualized realized vol
+BUY_NO_GATE_MIN_SIGMA = 0.20
+BUY_GATE_MIN_SIGMA = BUY_YES_GATE_MIN_SIGMA  # legacy alias for shadow logging
 BUY_GATE_MIN_DIST_PCT = 0.0010     # |strike - spot| / spot
 BUY_GATE_MIN_MINUTES = 15.0        # minutes left to close
 # Calibrated mp band: backtest shows BUY/SELL alpha lives strictly inside
@@ -201,8 +212,17 @@ def _row_calibrated_mp(row: PollRow) -> float:
     return row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob
 
 
-def _passes_buy_gates(row: PollRow) -> bool:
-    if row.sigma is None or row.sigma < BUY_GATE_MIN_SIGMA:
+def _passes_buy_gates(row: PollRow, side: str) -> bool:
+    """Per-side regime gate. Only the σ floor differs between BUY_YES and
+    BUY_NO; dist / T / mp-band are shared. `side` must be 'BUY_YES' or
+    'BUY_NO'."""
+    if side == "BUY_YES":
+        sigma_min = BUY_YES_GATE_MIN_SIGMA
+    elif side == "BUY_NO":
+        sigma_min = BUY_NO_GATE_MIN_SIGMA
+    else:
+        raise ValueError(f"_passes_buy_gates: side must be BUY_YES|BUY_NO, got {side!r}")
+    if row.sigma is None or row.sigma < sigma_min:
         return False
     if row.spot is None or row.spot <= 0 or row.strike is None:
         return False
@@ -297,8 +317,11 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
 
     Both BUY sides are regime-gated (see _passes_buy_gates) — we only open
     new positions when σ is high enough, the strike is far enough from spot,
-    and there's enough time left. SELL_YES is not gated; closing a long is
-    always allowed. The `policy` argument toggles whether each side is
+    and there's enough time left. The σ floor differs by side: BUY_YES uses
+    BUY_YES_GATE_MIN_SIGMA (high — wins concentrate at high vol), BUY_NO
+    uses the lower BUY_NO_GATE_MIN_SIGMA (NO-side alpha lives across all vol
+    bands per the bucketed backtest). SELL_YES is not gated; closing a long
+    is always allowed. The `policy` argument toggles whether each side is
     eligible at all; default preserves legacy BUY_YES-only entry behavior.
     """
     buy_yes_or_none, sell_or_none = _net_edges(row)
@@ -307,9 +330,14 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
     buy_no = buy_no_or_none if buy_no_or_none is not None else float("-inf")
     sell = sell_or_none if sell_or_none is not None else float("-inf")
 
-    gates_pass = _passes_buy_gates(row)
-    buy_yes_eligible = policy.allow_buy_yes and buy_yes > 0 and gates_pass
-    buy_no_eligible = policy.allow_buy_no and buy_no > 0 and gates_pass
+    buy_yes_eligible = (
+        policy.allow_buy_yes and buy_yes > 0
+        and _passes_buy_gates(row, "BUY_YES")
+    )
+    buy_no_eligible = (
+        policy.allow_buy_no and buy_no > 0
+        and _passes_buy_gates(row, "BUY_NO")
+    )
     sell_eligible = sell > 0  # policy.sell_yes_to_close_only is enforced by the executor
 
     candidates: list[tuple[str, float]] = []
