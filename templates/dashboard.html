@@ -342,6 +342,12 @@
   }
   .trades-summary .value.pos { color: var(--green); }
   .trades-summary .value.neg { color: var(--red); }
+  .trades-summary .subline {
+    font-size: 11px;
+    color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+    margin-top: -2px;
+  }
 
   .trades-grid td.outcome-won  { color: var(--green); font-weight: 600; }
   .trades-grid td.outcome-lost { color: var(--red);   font-weight: 600; }
@@ -852,7 +858,7 @@
     <div class="stat"><span class="label">Filled</span><span class="value" id="t-filled">—</span></div>
     <div class="stat"><span class="label">Settled</span><span class="value" id="t-settled">—</span></div>
     <div class="stat"><span class="label">Win rate</span><span class="value" id="t-winrate">—</span></div>
-    <div class="stat"><span class="label">Realized P&amp;L</span><span class="value" id="t-pnl">—</span></div>
+    <div class="stat"><span class="label">Realized P&amp;L</span><span class="value" id="t-pnl">—</span><span class="subline" id="t-pnl-sub"></span></div>
     <div class="stat"><span class="label">Open notional</span><span class="value" id="t-open">—</span></div>
     <div class="stat"><span class="label">Fees paid</span><span class="value" id="t-fees">—</span></div>
     <div class="stat"><span class="label">Cash</span><span class="value" id="t-cash">—</span></div>
@@ -1316,6 +1322,15 @@ async function refreshTrades() {
   const pnlEl = document.getElementById("t-pnl");
   pnlEl.textContent = fmtSignedUsd(s.realized_pnl_usd);
   pnlEl.className = "value " + (s.realized_pnl_usd > 0 ? "pos" : s.realized_pnl_usd < 0 ? "neg" : "");
+  const pnlSubEl = document.getElementById("t-pnl-sub");
+  const cap = s.allocated_capital_usd;
+  if (cap && cap > 0 && s.realized_pnl_usd != null) {
+    const pct = (s.realized_pnl_usd / cap) * 100;
+    const sign = pct >= 0 ? "+" : "−";
+    pnlSubEl.textContent = `${sign}${Math.abs(pct).toFixed(1)}% on $${cap.toFixed(0)} allocated`;
+  } else {
+    pnlSubEl.textContent = "";
+  }
   document.getElementById("t-open").textContent  = s.open_notional_usd == null ? "—" : "$" + s.open_notional_usd.toFixed(2);
   document.getElementById("t-fees").textContent  = s.fees_paid_usd == null ? "—" : "$" + s.fees_paid_usd.toFixed(2);
   document.getElementById("t-cash").textContent  = cash == null ? "—" : "$" + cash.toFixed(2);

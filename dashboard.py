@@ -29,6 +29,7 @@ from main import load_config
 from src.btc_feed import CoinbaseFeed
 from src.db import open_db
 from src.engine import EngineConfig, event_close_utc, run as run_engine
+from src.executor import BOT_PROFILES
 from src.trade_history import list_trades, summarize
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -250,6 +251,9 @@ def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
     with open_db(db_path) as db:
         trades = list_trades(db, trader, mode="live", limit=limit)
         summary = summarize(db, trader, mode="live")
+    profile = BOT_PROFILES.get(bot)
+    if profile is not None:
+        summary["allocated_capital_usd"] = profile.max_notional_usd
     return JSONResponse({"trades": trades, "summary": summary, "bot": bot})
 
 
