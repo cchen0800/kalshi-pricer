@@ -103,6 +103,16 @@
     font-variant-numeric: tabular-nums;
     color: var(--fg);
   }
+  .metric-value.pos { color: var(--green); }
+  .metric-value.neg { color: var(--red); }
+  .metric-sub {
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 1px;
+  }
   .stale .live-tag { color: var(--yellow); }
   .stale .hero-price { color: var(--yellow); }
 
@@ -771,6 +781,7 @@
     <div class="metric">
       <span class="metric-label">σ (60m, ann.)</span>
       <span class="metric-value" id="sigma">—</span>
+      <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
     </div>
     <div class="metric">
       <span class="metric-label">Time to close</span>
@@ -1163,6 +1174,21 @@ async function refresh() {
   flashIf("event",  data.event_title || data.event_ticker, v => v);
   flashIf("spot",   data.spot,         fmtMoney);
   flashIf("sigma",  data.sigma,        fmtPct);
+  // Color sigma against the engine's BUY_GATE_MIN_SIGMA (0.50). Below it,
+  // BUY_YES / BUY_NO entries are blocked regardless of edge — this is why
+  // the bot can sit idle for hours during calm regimes.
+  const sigEl = document.getElementById("sigma");
+  const sigSub = document.getElementById("sigma-gate");
+  if (data.sigma == null) {
+    sigEl.classList.remove("pos", "neg");
+    sigSub.textContent = "buy gate ≥50%";
+  } else if (data.sigma >= 0.50) {
+    sigEl.classList.add("pos"); sigEl.classList.remove("neg");
+    sigSub.textContent = "buy gate: open";
+  } else {
+    sigEl.classList.add("neg"); sigEl.classList.remove("pos");
+    sigSub.textContent = "buy gate: blocked (≥50%)";
+  }
   closeTsMs = data.ts_ms + data.minutes_left * 60000;
   tickClose();
   document.getElementById("thresh").textContent = "±" + data.threshold_cents.toFixed(1) + "¢";
