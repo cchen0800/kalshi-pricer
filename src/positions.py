@@ -148,12 +148,27 @@ def snapshot(
         if mt:
             sett_by_market[mt] = s
 
+    # Side-translation map: Kalshi mirrors a `sell yes` fill into the fills
+    # feed as `side=no, action=sell` (yes/no being symmetric representations of
+    # the same trade — yes_price + no_price = 1.00). If we key the per-side
+    # aggregation below on Kalshi's reported side, the (yes) bucket's
+    # sell_count never increments after a yes-sell, leaving `held_yes`
+    # permanently inflated. The executor's sell-yes guard
+    # (`held_yes > 0`) then passes forever, so each subsequent sell-yes
+    # opens an unbounded NO long that bypasses the notional cap. We undo
+    # the translation by looking up our submitted side from the intent.
     bot_order_ids: set[str] = set()
-    for (oid,) in conn.execute(
-        "SELECT kalshi_order_id FROM intended_orders "
-        "WHERE mode='live' AND kalshi_order_id IS NOT NULL"
+    intent_by_oid: dict[str, tuple[str, str]] = {}
+    intent_by_coid: dict[str, tuple[str, str]] = {}
+    for oid, coid, i_side, i_action in conn.execute(
+        "SELECT kalshi_order_id, client_order_id, side, action "
+        "FROM intended_orders WHERE mode='live'"
     ):
-        bot_order_ids.add(oid)
+        if oid:
+            bot_order_ids.add(oid)
+            intent_by_oid[oid] = (i_side, i_action)
+        if coid:
+            intent_by_coid[coid] = (i_side, i_action)
 
     def _is_bot_fill(f: dict) -> bool:
         oid = f.get("order_id")
@@ -175,17 +190,32 @@ def snapshot(
         market = f.get("ticker") or f.get("market_ticker") or ""
         if not market:
             continue
-        side = f.get("side") or "yes"
-        action = f.get("action") or ""
+        raw_side = f.get("side") or "yes"
+        oid = f.get("order_id")
+        coid = f.get("client_order_id") or ""
+        intent = (
+            intent_by_oid.get(oid)
+            if oid and oid in intent_by_oid
+            else intent_by_coid.get(coid)
+        )
+        # Use our submitted (side, action) when known; the fill's reported
+        # side may be the mirror representation (see comment above).
+        if intent is not None:
+            side, action = intent
+        else:
+            side = raw_side
+            action = f.get("action") or ""
         count = int(round(_f(f.get("count_fp") or f.get("count"))))
         if count <= 0:
             continue
-        price_per = _f(
-            f.get("yes_price_dollars") if side == "yes"
+        # Price is always reported under Kalshi's side. If we flipped sides
+        # we need the complement (yes_price = 1.00 - no_price).
+        raw_price = _f(
+            f.get("yes_price_dollars") if raw_side == "yes"
             else f.get("no_price_dollars")
         )
+        price_per = (1.0 - raw_price) if side != raw_side else raw_price
         fee = _f(f.get("fee_cost"))
-        oid = f.get("order_id")
         if oid:
             fills_oids.add(oid)
 

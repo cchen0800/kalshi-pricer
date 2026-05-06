@@ -459,6 +459,40 @@ def test_coid_prefix_attribution_recovers_unlinked_fill(db):
     assert snap.open_notional_usd == pytest.approx(1.50)
 
 
+def test_sell_yes_fill_reported_as_no_side_decrements_yes_held(db):
+    """Kalshi mirrors a `sell yes` order into the fills feed as
+    `side=no, action=sell` (yes_price + no_price = 1.00). Without translating
+    back via the intent, the (yes) bucket's sell_count never increments,
+    `held_yes` stays inflated, the executor's sell-yes guard keeps passing,
+    and each subsequent sell-yes opens an unbounded long-NO that bypasses
+    the notional cap. Caused real overage on the 6am EDT 2026-05-06 ETH
+    event."""
+    market = "KXBTCD-N-T1"
+    buy_fill = make_fill(market=market, side="yes", action="buy",
+                         count=10, fill_cents=12)
+    insert_intent(db, market=market, side="yes", action="buy",
+                  count=10, limit_cents=12,
+                  kalshi_order_id=buy_fill["order_id"])
+    sell_oid = insert_intent(db, market=market, side="yes", action="sell",
+                             count=10, limit_cents=60)
+    sell_fill = {
+        "order_id": sell_oid,
+        "client_order_id": f"coid-{sell_oid}",
+        "ticker": market,
+        "side": "no",
+        "action": "sell",
+        "count": 10,
+        "no_price_dollars": 0.40,
+        "fee_cost": "0.00",
+        "created_time": now_iso(),
+    }
+    snap = snapshot(db, FakeTrader(fills=[buy_fill, sell_fill]))
+    assert snap is not None
+    assert snap.open_contracts_by_market == {}
+    assert snap.open_notional_usd == 0.0
+    assert snap.realized_pnl_today_usd == pytest.approx(4.80)
+
+
 def test_sibling_bot_fill_not_attributed(db):
     """Fill carries a different bot's COID prefix and order_id we don't know.
     Must NOT show up in our snapshot, even though the fill is on the same
