@@ -16,20 +16,23 @@ import argparse
 import os
 import sqlite3
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from main import load_config
+from src.access_log import AccessLogger, client_ip_from_headers
 from src.btc_feed import CoinbaseFeed
 from src.db import open_db
 from src.engine import EngineConfig, event_close_utc, run as run_engine
 from src.executor import BOT_PROFILES
+from src.notify import TelegramNotifier
 from src.trade_history import list_trades, summarize
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -108,6 +111,18 @@ async def lifespan(app: FastAPI):
     cfg = load_config()
     feed = CoinbaseFeed()
     trader = _try_init_trader()
+    # Visitor pings go to a separate "screener" Telegram bot so they don't
+    # share a chat with order-fill / kill-switch alerts. Falls back to the
+    # trading bot's creds if SCREENER_* aren't set.
+    notifier = TelegramNotifier(
+        token=os.environ.get("SCREENER_BOT_TOKEN"),
+        chat_id=os.environ.get("SCREENER_CHAT_ID"),
+    )
+    access_log = AccessLogger(
+        log_dir=ROOT / "logs",
+        label="kalshi-pricer",
+        notifier=notifier,
+    )
     no_engine = os.environ.get("DASHBOARD_NO_ENGINE") == "1"
     aggressive_db = _aggressive_db_path(cfg.db_path)
     if no_engine:
@@ -115,12 +130,13 @@ async def lifespan(app: FastAPI):
         # writing to the same DB; we just read.
         _state.update(
             thread=None, stop=None, cfg=cfg, feed=feed, trader=trader,
-            aggressive_db=aggressive_db,
+            aggressive_db=aggressive_db, access_log=access_log, notifier=notifier,
         )
         try:
             yield
         finally:
             feed.close()
+            notifier.close()
             if trader is not None:
                 try: trader.close()
                 except Exception: pass
@@ -131,7 +147,7 @@ async def lifespan(app: FastAPI):
     th.start()
     _state.update(
         thread=th, stop=stop, cfg=cfg, feed=feed, trader=trader,
-        aggressive_db=aggressive_db,
+        aggressive_db=aggressive_db, access_log=access_log, notifier=notifier,
     )
     try:
         yield
@@ -139,12 +155,34 @@ async def lifespan(app: FastAPI):
         stop.set()
         th.join(timeout=10)
         feed.close()
+        notifier.close()
         if trader is not None:
             try: trader.close()
             except Exception: pass
 
 
 app = FastAPI(lifespan=lifespan, title="kalshi-pricer dashboard")
+
+
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    dur_ms = (time.perf_counter() - start) * 1000
+    al: AccessLogger | None = _state.get("access_log")
+    if al is not None:
+        peer = request.client.host if request.client else ""
+        ip = client_ip_from_headers(request.headers, peer)
+        al.record(
+            ip=ip,
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            user_agent=request.headers.get("user-agent", ""),
+            referer=request.headers.get("referer", ""),
+            duration_ms=dur_ms,
+        )
+    return response
 
 
 def _conn() -> sqlite3.Connection:
@@ -255,6 +293,20 @@ def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
     if profile is not None:
         summary["allocated_capital_usd"] = profile.max_notional_usd
     return JSONResponse({"trades": trades, "summary": summary, "bot": bot})
+
+
+@app.get("/api/visitors")
+def api_visitors(limit: int = 200) -> JSONResponse:
+    """Recent request log + the persisted set of unique IPs we've notified for."""
+    al: AccessLogger | None = _state.get("access_log")
+    if al is None:
+        raise HTTPException(503, "access log not ready")
+    uniq = al.unique_ips()
+    return JSONResponse({
+        "recent": al.recent(limit=limit),
+        "unique_ips": uniq,
+        "n_unique": len(uniq),
+    })
 
 
 @app.get("/api/events")
