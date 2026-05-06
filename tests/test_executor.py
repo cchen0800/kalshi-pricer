@@ -256,10 +256,12 @@ def test_order_notification_escapes_markdown_specials(db, monkeypatch):
     # Strip those, then any remaining * is a bug.
     body_after_bold = msg.split("*", 2)[-1]  # everything after the closing bold *
     assert "*" not in body_after_bold
-    # Underscores must always be escaped. The order_id contained _with_ which
-    # would have crashed the parser; check it's escaped now.
+    # The order_id is uuid-shaped (contains underscores in some Kalshi builds)
+    # and used to break Markdown parsing. The current notifier drops it from
+    # the user-facing message entirely — verify it's nowhere in the body.
+    assert "fecc03f0" not in msg
     assert "with_underscores" not in msg
-    assert "with\\_underscores" in msg
+    assert "order_id" not in msg
 
 
 def test_fail_closed_when_snapshot_unavailable(db, monkeypatch):

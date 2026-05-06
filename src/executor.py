@@ -21,6 +21,7 @@ from __future__ import annotations
 import collections
 import logging
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -49,6 +50,32 @@ def _md_escape(s: str) -> str:
     for ch in ("_", "*", "`", "["):
         s = s.replace(ch, "\\" + ch)
     return s
+
+
+_EVENT_RE = re.compile(r"^KX(?:ETH|BTC)D-(\d{2})([A-Z]{3})(\d{2})(\d{2})$")
+
+
+def _format_strike(market_ticker: str) -> str:
+    """KXBTCD-26MAY0610-T80999.99 → 'above $81,000'."""
+    last = market_ticker.rsplit("-", 1)[-1]
+    if not last.startswith("T"):
+        return last
+    try:
+        n = float(last[1:])
+    except ValueError:
+        return last
+    return f"above ${math.ceil(n):,d}"
+
+
+def _format_event(event_ticker: str) -> str:
+    """KXBTCD-26MAY0610 → 'MAY 06 10 AM ET'."""
+    m = _EVENT_RE.match(event_ticker or "")
+    if not m:
+        return event_ticker or "—"
+    h = int(m.group(4))
+    h12 = (h % 12) or 12
+    ampm = "AM" if h < 12 else "PM"
+    return f"{m.group(2)} {m.group(3)} {h12} {ampm} ET"
 
 # ---- HARDCODED GUARDS — DO NOT MOVE TO CONFIG ----
 # Per-bot risk knobs live in BOT_PROFILES below. Anything that varies between
@@ -485,23 +512,26 @@ class Executor:
             return
         # Telegram Markdown: any interpolated string that could contain _, *,
         # `, or [ must be escaped or the whole message gets rejected with a 400.
-        # Previously only `market` was escaped; the `status` string contains
-        # "order_id=..." whose underscore opened an unclosed italic and silently
-        # killed every order alert.
-        market = _md_escape(ticket.market_ticker)
-        status_md = _md_escape(status)
+        # The order_id (uuid with underscores) used to silently open an
+        # unclosed italic and break every alert — it now lives in the log,
+        # not the user-facing message.
         bot_md = _md_escape(self.profile.bot_id)
+        # Drop "(order_id=...)" suffix from status for display; it's noise.
+        status_clean = status.split(" (order_id=", 1)[0]
+        status_md = _md_escape(status_clean)
+        strike_md = _md_escape(_format_strike(ticket.market_ticker))
+        event_md = _md_escape(_format_event(ticket.event_ticker))
         if ticket.action == "buy":
             side_word = "BUY NO" if ticket.side == "no" else "BUY YES"
         else:
             side_word = "SELL NO" if ticket.side == "no" else "SELL YES"
         msg = (
-            f"*[{mode} {bot_md}] {side_word}* {ticket.count} @ {ticket.limit_price_cents}¢\n"
-            f"`{market}`\n"
-            f"strike: ${ticket.spot:,.0f} spot ; T-{ticket.minutes_left:.1f}min\n"
-            f"model: {ticket.model_prob*100:.1f}¢  edge: +{ticket.edge_cents:.1f}¢\n"
-            f"notional: ${ticket.notional_usd:.2f}\n"
-            f"status: {status_md}"
+            f"*[{mode} {bot_md}] {side_word}*  "
+            f"{ticket.count} × {ticket.limit_price_cents}¢  (${ticket.notional_usd:.2f})\n"
+            f"{strike_md} · {event_md}\n"
+            f"spot ${ticket.spot:,.0f} · T-{ticket.minutes_left:.0f}min · "
+            f"model {ticket.model_prob*100:.1f}¢ · edge +{ticket.edge_cents:.1f}¢\n"
+            f"_{status_md}_"
         )
         self.notifier.send(msg)
 
