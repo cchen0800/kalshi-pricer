@@ -1,0 +1,11 @@
+[Unit]
+Description=All kalshi-pricer / eth-pricer bots and dashboards
+Wants=kalshi-pricer-selective.service
+Wants=kalshi-pricer-aggressive.service
+Wants=kalshi-pricer-web.service
+Wants=eth-pricer-selective.service
+Wants=eth-pricer-aggressive.service
+Wants=eth-pricer-web.service
+
+[Install]
+WantedBy=default.target

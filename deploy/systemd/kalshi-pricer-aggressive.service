@@ -1,0 +1,17 @@
+[Unit]
+Description=kalshi-pricer BTC aggressive bot (live trader, no Telegram listener)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/kalshi-pricer
+ExecStart=/home/chris/kalshi-pricer/.venv/bin/python trade.py --live --profile aggressive --yes-i-know --no-telegram-listen
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/chris/kalshi-pricer/logs/aggressive.log
+StandardError=append:/home/chris/kalshi-pricer/logs/aggressive.log
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

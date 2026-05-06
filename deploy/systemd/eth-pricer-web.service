@@ -1,0 +1,17 @@
+[Unit]
+Description=eth-pricer ETH dashboard (read-only, port 5052)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/eth-pricer
+ExecStart=/home/chris/eth-pricer/.venv/bin/python dashboard.py --port 5052 --no-engine
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/chris/eth-pricer/logs/web.log
+StandardError=append:/home/chris/eth-pricer/logs/web.log
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

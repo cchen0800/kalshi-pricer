@@ -1,0 +1,17 @@
+[Unit]
+Description=kalshi-pricer BTC dashboard (read-only, port 5051)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/kalshi-pricer
+ExecStart=/home/chris/kalshi-pricer/.venv/bin/python dashboard.py --port 5051 --no-engine
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/chris/kalshi-pricer/logs/web.log
+StandardError=append:/home/chris/kalshi-pricer/logs/web.log
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
