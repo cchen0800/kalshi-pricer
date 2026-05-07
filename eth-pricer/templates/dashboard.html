@@ -1,0 +1,1437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#000000" />
+<title>kalshi-pricer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='%2300D632'/></svg>">
+<style>
+  :root {
+    --bg: #000000;
+    --bg-elev: #0F0F0F;
+    --bg-elev-2: #161616;
+    --hairline: #1F1F1F;
+    --hairline-strong: #2A2A2A;
+
+    --fg: #FFFFFF;
+    --fg-2: #B0B0B0;
+    --fg-3: #6B6B6B;
+    --fg-dim: #6B6B6B;
+
+    --green: #00D632;
+    --green-soft: rgba(0, 214, 50, 0.14);
+    --green-bg: rgba(0, 214, 50, 0.06);
+    --red: #FF5A52;
+    --red-soft: rgba(255, 90, 82, 0.14);
+    --red-bg: rgba(255, 90, 82, 0.06);
+    --blue: #1E64FF;
+    --yellow: #F6B100;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* Hero */
+  .hero {
+    padding: 28px 32px 22px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .live-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--green);
+    margin-bottom: 10px;
+  }
+  .live-tag::before {
+    content: "";
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 10px currentColor;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  .hero-price {
+    font-size: 44px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.05;
+    margin-bottom: 4px;
+  }
+  .hero-sub {
+    color: var(--fg-2);
+    font-size: 14px;
+    font-weight: 400;
+  }
+  .hero-metrics {
+    display: flex;
+    gap: 36px;
+    margin-top: 22px;
+    flex-wrap: wrap;
+  }
+  .metric {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .metric-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .metric-value {
+    font-size: 15px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+  }
+  .metric-value.pos { color: var(--green); }
+  .metric-value.neg { color: var(--red); }
+  .metric-sub {
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 1px;
+  }
+  .stale .live-tag { color: var(--yellow); }
+  .stale .hero-price { color: var(--yellow); }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+  .tab {
+    background: transparent;
+    border: none;
+    color: var(--fg-3);
+    padding: 14px 16px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .tab:hover { color: var(--fg-2); }
+  .tab.active {
+    color: var(--fg);
+    border-bottom-color: var(--green);
+    font-weight: 600;
+  }
+
+  /* Filters */
+  .filters {
+    display: flex;
+    gap: 8px;
+    padding: 16px 32px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .filters .label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    letter-spacing: 0.08em;
+    font-weight: 500;
+    margin-right: 4px;
+  }
+  .filter-btn {
+    background: var(--bg-elev);
+    color: var(--fg-2);
+    border: 1px solid var(--hairline);
+    padding: 7px 14px;
+    border-radius: 999px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .filter-btn:hover {
+    background: var(--bg-elev-2);
+    color: var(--fg);
+    border-color: var(--hairline-strong);
+  }
+  .filter-btn.active {
+    background: var(--fg);
+    color: var(--bg);
+    border-color: var(--fg);
+    font-weight: 600;
+  }
+  .filter-btn .count {
+    margin-left: 6px;
+    opacity: 0.55;
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+  .filter-btn.active .count { opacity: 0.7; }
+
+  main { padding: 0; }
+
+  /* Grid */
+  .grid {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .grid th, .grid td {
+    text-align: right;
+    padding: 13px 16px;
+    font-variant-numeric: tabular-nums;
+  }
+  .grid th {
+    color: var(--fg-3);
+    font-weight: 500;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--hairline-strong);
+  }
+  .grid td {
+    border-bottom: 1px solid var(--hairline);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .grid tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
+  .grid th:first-child, .grid td:first-child {
+    text-align: left;
+    padding-left: 32px;
+  }
+  .grid th:last-child, .grid td:last-child {
+    padding-right: 32px;
+  }
+  .grid tr.atm td {
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--fg);
+    font-weight: 600;
+  }
+  .grid tr.cold td { color: var(--fg-3); }
+
+  /* Flagged rows — model disagrees with market by > threshold. */
+  .grid tr.buy  td { background: var(--green-bg); }
+  .grid tr.sell td { background: var(--red-bg); }
+  .grid tbody tr.buy:hover  td { background: var(--green-soft); }
+  .grid tbody tr.sell:hover td { background: var(--red-soft); }
+  .grid tr.buy  td:first-child { box-shadow: inset 3px 0 var(--green); }
+  .grid tr.sell td:first-child { box-shadow: inset 3px 0 var(--red); }
+
+  /* Pills (Yes/No) */
+  .pill {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    min-width: 56px;
+    text-align: center;
+    border: none;
+  }
+  .pill.yes { background: var(--green-soft); color: var(--green); }
+  .pill.no  { background: var(--red-soft);   color: var(--red); }
+  .pill.mute { opacity: 0.4; }
+  td.pill-cell, th.pill-cell { text-align: center; }
+
+  /* Action column */
+  .action {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .action.BUY_YES  { color: var(--green); }
+  .action.SELL_YES { color: var(--red); }
+  .action.NONE     { color: var(--fg-3); font-weight: 400; }
+
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+
+  .strike-label {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+  }
+  .strike-label .above {
+    color: var(--fg-3);
+    font-weight: 400;
+    font-size: 12px;
+    margin-left: 4px;
+  }
+  .market-ticker {
+    color: var(--fg-3);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    word-break: break-all;
+  }
+
+  /* Footer */
+  .footer {
+    margin: 28px 32px;
+    color: var(--fg-3);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .legend {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+  }
+  .swatch {
+    display: inline-block;
+    width: 8px; height: 8px;
+    vertical-align: middle;
+    margin-right: 6px;
+    border-radius: 50%;
+  }
+  .swatch.buy { background: var(--green); }
+  .swatch.sell { background: var(--red); }
+
+  /* Trades summary cards */
+  .trades-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    padding: 24px 32px 12px;
+  }
+  .trades-summary .stat {
+    background: var(--bg-elev);
+    padding: 16px 18px;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 1px solid var(--hairline);
+  }
+  .trades-summary .label {
+    font-size: 10.5px;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 500;
+  }
+  .trades-summary .value {
+    font-size: 19px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .trades-summary .value.pos { color: var(--green); }
+  .trades-summary .value.neg { color: var(--red); }
+  .trades-summary .subline {
+    font-size: 11px;
+    color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+    margin-top: -2px;
+  }
+
+  #trades-grid td.outcome-won  { color: var(--green); font-weight: 600; }
+  #trades-grid td.outcome-lost { color: var(--red);   font-weight: 600; }
+  #trades-grid td.outcome-open { color: var(--fg-3); }
+  #trades-grid td.pnl-pos { color: var(--green); font-weight: 600; }
+  #trades-grid td.pnl-neg { color: var(--red);   font-weight: 600; }
+  #trades-grid td.muted   { color: var(--fg-3); }
+  #trades-grid .ticker-mini {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10.5px;
+    color: var(--fg-3);
+    margin-top: 2px;
+  }
+
+  /* Animations */
+  @keyframes pulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+  @keyframes flash {
+    from { color: var(--blue); }
+    to   { color: inherit; }
+  }
+  .flash, .flash * { animation: flash 0.6s ease-out; }
+
+  /* Guide */
+  .guide {
+    max-width: 760px;
+    padding: 32px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--fg);
+  }
+  .guide h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    letter-spacing: -0.01em;
+  }
+  .guide .lede {
+    color: var(--fg-2);
+    margin-bottom: 32px;
+    font-size: 15px;
+  }
+  .guide h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-3);
+    font-weight: 600;
+    margin: 32px 0 12px;
+  }
+  .guide p { margin: 12px 0; }
+  .guide code {
+    background: var(--bg-elev);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px;
+    color: var(--fg);
+  }
+  .guide pre {
+    background: var(--bg-elev);
+    padding: 14px 18px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    margin: 14px 0;
+    border: 1px solid var(--hairline);
+  }
+  .guide pre code { background: none; padding: 0; }
+  .guide ul, .guide ol { padding-left: 22px; margin: 8px 0; }
+  .guide li { margin: 6px 0; }
+  .guide table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 14px 0;
+  }
+  .guide th, .guide td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 14px;
+    vertical-align: top;
+  }
+  .guide th {
+    color: var(--fg-3);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    border-bottom-color: var(--hairline-strong);
+  }
+  .guide strong { color: var(--fg); font-weight: 600; }
+  .guide .callout {
+    border-left: 3px solid var(--green);
+    background: var(--bg-elev);
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 8px 8px 0;
+  }
+  .guide .pill-demo {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .guide .pill-demo.yes { background: var(--green-soft); color: var(--green); }
+  .guide .pill-demo.no  { background: var(--red-soft);   color: var(--red); }
+  .guide kbd {
+    background: var(--bg-elev);
+    border: 1px solid var(--hairline);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
+
+  /* ==== Mobile (≤720px) =====================================================
+   * Each <tr> becomes a packed CSS-grid card. Column-area names mirror the
+   * desktop <th> order — change the HTML column count and you must remap the
+   * grid-area assignments below. Packs 9-to-11 fields per row into 3-4 visual
+   * lines instead of stacking each <td> on its own line.
+   */
+  @media (max-width: 720px) {
+    body { font-size: 14px; }
+
+    /* Hero — compact */
+    .hero { padding: 14px 16px 12px; }
+    .live-tag { margin-bottom: 6px; font-size: 10.5px; }
+    .hero-price { font-size: 30px; line-height: 1.1; }
+    .hero-sub { font-size: 13px; line-height: 1.35; }
+    .hero-metrics {
+      gap: 10px 18px;
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+    .metric-label { font-size: 9.5px; }
+    .metric-value { font-size: 13.5px; }
+
+    /* Asset switcher — flatter, smaller pills */
+    .asset-switcher { padding: 10px 16px 0; gap: 6px; }
+    .asset-switcher a { padding: 6px 14px; font-size: 11.5px; }
+
+    /* Tabs — sticky to top, horizontal scroll if more get added */
+    .tabs {
+      padding: 0 8px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab { padding: 12px 14px; font-size: 13px; flex-shrink: 0; }
+
+    /* Filters — sticky directly under the tabs row, horizontal scroll */
+    .filters {
+      padding: 10px 16px;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      position: sticky;
+      top: 44px;
+      z-index: 4;
+      background: var(--bg);
+      border-bottom: 1px solid var(--hairline);
+    }
+    .filters::-webkit-scrollbar { display: none; }
+    .filters .label, .filter-btn { flex-shrink: 0; }
+    .filter-btn { padding: 6px 12px; font-size: 12px; }
+    .filter-btn .count { display: none; }   /* counts add clutter on phones */
+
+    /* Common: <table> → block; <tr> → grid card */
+    .grid, .grid tbody { display: block; width: 100%; }
+    .grid thead { display: none; }
+    .grid tr {
+      display: grid;
+      width: 100%;
+      padding: 12px 16px;
+      gap: 5px 12px;
+      border-bottom: 1px solid var(--hairline);
+      align-items: center;
+      position: relative;
+    }
+    .grid td {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0;
+      border: none;
+      font-size: 13.5px;
+      text-align: left;
+      min-width: 0;
+    }
+    /* Default: no ::before — turned on selectively per-cell below. */
+    .grid td::before { content: none; }
+    .grid td.pill-cell { justify-content: flex-start; }
+
+    /* Side stripe via border-left (the inset box-shadow needed table layout). */
+    .grid tr.buy  { border-left: 3px solid var(--green); padding-left: 13px; }
+    .grid tr.sell { border-left: 3px solid var(--red);   padding-left: 13px; }
+    .grid tr.buy td:first-child, .grid tr.sell td:first-child { box-shadow: none; }
+    .grid tr.atm td { background: transparent; }
+    .grid tr.atm    { background: rgba(255, 255, 255, 0.025); }
+    .grid tr.cold   { opacity: 0.55; }
+    .grid tbody tr:hover td { background: transparent; }
+
+    /* Smaller pills on phones */
+    .pill { min-width: 50px; padding: 3px 9px; font-size: 11.5px; }
+
+    .strike-label { font-size: 15px; }
+    .strike-label .above { font-size: 11.5px; color: var(--fg-3); }
+
+    /* ---- Live grid (#grid) ----------------------------------------------
+       <th> order: 1 strike | 2 chance | 3 model | 4 yes | 5 no |
+                   6 edge   | 7 action | 8 size  | 9 ticker
+       Card:
+         [ strike ............................. ] [ action ]
+         [ yes-pill ] [ no-pill ]                   [ edge  ]
+         [ Mkt 70% ] [ Mdl 76% ]                    [ × 145 ]
+         [ ticker (full-width muted mono) ............... ]
+    */
+    #grid tr {
+      grid-template-columns: minmax(0, auto) minmax(0, auto) minmax(0, 1fr);
+      grid-template-areas:
+        "strike  strike  action"
+        "yes     no      edge"
+        "chance  model   size"
+        "ticker  ticker  ticker";
+    }
+    #grid td:nth-child(1) { grid-area: strike; font-size: 15px; font-weight: 700; }
+    #grid td:nth-child(2) { grid-area: chance; color: var(--fg-2); font-size: 12.5px; }
+    #grid td:nth-child(3) { grid-area: model;  color: var(--fg-2); font-size: 12.5px; }
+    #grid td:nth-child(4) { grid-area: yes; }
+    #grid td:nth-child(5) { grid-area: no; }
+    #grid td:nth-child(6) { grid-area: edge;   justify-content: flex-end; font-weight: 600; }
+    #grid td:nth-child(7) { grid-area: action; justify-content: flex-end; font-weight: 600; font-size: 13px; }
+    #grid td:nth-child(8) { grid-area: size;   justify-content: flex-end; color: var(--fg-3); font-size: 12px; }
+    #grid td:nth-child(9) {
+      grid-area: ticker;
+      display: block;
+      color: var(--fg-3);
+      font-size: 10.5px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      padding-top: 6px;
+      margin-top: 2px;
+      border-top: 1px solid var(--hairline);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Tiny inline labels on the secondary metric cells. */
+    #grid td:nth-child(2)::before,
+    #grid td:nth-child(3)::before,
+    #grid td:nth-child(8)::before {
+      color: var(--fg-3);
+      font-size: 9.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    #grid td:nth-child(2)::before { content: "Mkt"; }
+    #grid td:nth-child(3)::before { content: "Mdl"; }
+    #grid td:nth-child(8)::before { content: "Size"; }
+    /* Dim the action cell when nothing's flagged so it doesn't compete with the strike. */
+    #grid td.action.NONE { opacity: 0.35; }
+
+    /* ---- Trades summary — 2-col grid ------------------------------------- */
+    .trades-summary {
+      grid-template-columns: 1fr 1fr;
+      padding: 12px 16px;
+      gap: 8px;
+    }
+    .trades-summary .stat { padding: 11px 13px; }
+    .trades-summary .label { font-size: 9.5px; }
+    .trades-summary .value { font-size: 15px; }
+
+    /* ---- Trades grid (#trades-grid) -------------------------------------
+       <th> order: 1 when | 2 event | 3 strike | 4 side | 5 qty |
+                   6 limit/fill | 7 edge | 8 notional | 9 status |
+                   10 outcome | 11 pnl
+       Card:
+         [ strike (+ ticker child div) .... ]   [outcome] [pnl]
+         [ side  × qty   limit→fill ]                     [edge]
+         [ when · event ........... ]    [status]   [notional]
+    */
+    #trades-grid tr {
+      grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      grid-template-areas:
+        "strike   strike  strike  outcome  pnl"
+        "side     qty     price   edge     edge"
+        "when     event   event   status   notional";
+      row-gap: 5px;
+      column-gap: 8px;
+      align-items: center;
+    }
+    #trades-grid td:nth-child(1)  { grid-area: when;     color: var(--fg-3); font-size: 11px; }
+    #trades-grid td:nth-child(2)  { grid-area: event;    color: var(--fg-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #trades-grid td:nth-child(3)  {
+      grid-area: strike;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    #trades-grid td:nth-child(4)  { grid-area: side;     font-weight: 600; font-size: 13px; white-space: nowrap; }
+    #trades-grid td:nth-child(5)  { grid-area: qty;      color: var(--fg-2); font-size: 12.5px; }
+    #trades-grid td:nth-child(5)::before { content: "×"; color: var(--fg-3); margin-right: 1px; }
+    #trades-grid td:nth-child(6)  { grid-area: price;    font-size: 12.5px; white-space: nowrap; }
+    #trades-grid td:nth-child(7)  { grid-area: edge;     justify-content: flex-end; font-weight: 600; }
+    #trades-grid td:nth-child(8)  { grid-area: notional; justify-content: flex-end; color: var(--fg-3); font-size: 11px; white-space: nowrap; }
+    #trades-grid td:nth-child(9)  { grid-area: status;   justify-content: flex-end; color: var(--fg-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    #trades-grid td:nth-child(10) { grid-area: outcome;  justify-content: flex-end; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+    #trades-grid td:nth-child(11) { grid-area: pnl;      justify-content: flex-end; font-weight: 700; font-size: 14px; }
+
+    #trades-grid .ticker-mini { margin-top: 0; }
+
+    /* "No rows" placeholder collapses the grid to one full-width centered cell. */
+    #trades-grid tbody tr td[colspan] {
+      grid-column: 1 / -1;
+      justify-content: center;
+      text-align: center;
+      padding: 24px 16px;
+    }
+
+    /* Footer + guide */
+    .footer { margin: 20px 16px; font-size: 11.5px; }
+    .legend { gap: 12px; }
+    .guide { padding: 20px 16px; font-size: 14px; }
+    .guide h1 { font-size: 22px; }
+    .guide pre { font-size: 12px; padding: 12px 14px; }
+    .guide table th, .guide table td { padding: 8px 10px; font-size: 13px; }
+  }
+
+  /* Tighter still on very small phones (≤380px). Drop to a 2-col grid so
+     pills, edge, and action don't get squeezed. */
+  @media (max-width: 380px) {
+    .hero-price { font-size: 28px; }
+    .hero-metrics { grid-template-columns: 1fr; gap: 10px; }
+    .tab { padding: 12px 10px; }
+    .trades-summary { grid-template-columns: 1fr; }
+
+    #grid tr {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "strike  action"
+        "yes     edge"
+        "no      size"
+        "chance  model"
+        "ticker  ticker";
+    }
+    #grid td:nth-child(2) { justify-content: flex-start; }
+    #grid td:nth-child(3) { justify-content: flex-end; }
+
+    #trades-grid tr {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "strike   pnl"
+        "side     outcome"
+        "qty      edge"
+        "price    notional"
+        "when     status"
+        "event    event";
+      row-gap: 4px;
+    }
+  }
+
+  /* Respect notch/safe-area on iOS (landscape notched devices) */
+  @supports (padding: max(0px)) {
+    .hero { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+    .tabs { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+    .asset-switcher,
+    .filters,
+    .trades-summary,
+    .footer {
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+    .grid tr {
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+    .grid tr.buy, .grid tr.sell {
+      padding-left: max(13px, calc(env(safe-area-inset-left) - 3px));
+    }
+    body { padding-bottom: env(safe-area-inset-bottom); }
+  }
+
+  /* Top-level asset switcher: navigates between sibling dashboards. */
+  .asset-switcher {
+    display: flex;
+    gap: 8px;
+    padding: 14px 32px 0;
+    background: var(--bg);
+  }
+  .asset-switcher a {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 16px;
+    border-radius: 999px;
+    background: var(--bg-elev);
+    border: 1px solid var(--hairline);
+    color: var(--fg-3);
+    text-decoration: none;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .asset-switcher a:hover { color: var(--fg-1); border-color: var(--fg-3); }
+  .asset-switcher a.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: transparent;
+  }
+  .asset-switcher a.active:hover { color: #fff; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.min.js"></script>
+</head>
+<body>
+
+<nav class="asset-switcher">
+  <a href="https://trade.baggaar.com/">BTC</a>
+  <a class="active" href="https://eth.baggaar.com/">ETH</a>
+</nav>
+
+<header class="hero">
+  <span class="live-tag">Live</span>
+  <h1 class="hero-price"><span id="spot">—</span></h1>
+  <p class="hero-sub"><span id="event">—</span></p>
+  <div class="hero-metrics">
+    <div class="metric">
+      <span class="metric-label">σ (60m, ann.)</span>
+      <span class="metric-value" id="sigma">—</span>
+      <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Time to close</span>
+      <span class="metric-value" id="ttl">—</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Edge threshold</span>
+      <span class="metric-value" id="thresh">—</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Last poll</span>
+      <span class="metric-value" id="age">—</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="live">Live</button>
+  <button class="tab" data-tab="trades">Trades</button>
+  <button class="tab" data-tab="guide">Guide</button>
+</nav>
+
+<main id="tab-live">
+  <div id="status" style="margin: 16px 32px; color: var(--fg-3);">
+    Waiting for first poll… (the engine runs every 30 s by default)
+  </div>
+
+  <div class="filters" id="filters" style="display:none;">
+    <span class="label">Show</span>
+    <button class="filter-btn" data-filter="all">All <span class="count" id="count-all">—</span></button>
+    <button class="filter-btn" data-filter="itm">ITM <span class="count" id="count-itm">—</span></button>
+    <button class="filter-btn active" data-filter="atm">ATM ±$500 <span class="count" id="count-atm">—</span></button>
+    <button class="filter-btn" data-filter="otm">OTM <span class="count" id="count-otm">—</span></button>
+    <button class="filter-btn" data-filter="flagged">Flagged <span class="count" id="count-flagged">—</span></button>
+  </div>
+
+  <table class="grid" id="grid" style="display:none;">
+    <thead>
+      <tr>
+        <th>Strike</th>
+        <th>Chance</th>
+        <th>Model</th>
+        <th class="pill-cell">Yes</th>
+        <th class="pill-cell">No</th>
+        <th>Edge</th>
+        <th>Action</th>
+        <th>Size</th>
+        <th>Ticker</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="footer">
+    <div class="legend">
+      <span><span class="swatch buy"></span>model > ask + threshold → Buy YES</span>
+      <span><span class="swatch sell"></span>model < bid − threshold → Buy NO</span>
+    </div>
+    <div style="margin-top:6px;">
+      Settlement is CF Benchmarks ERTI; Coinbase used as proxy. Treat sub-$10 basis-equivalent edges with skepticism.
+    </div>
+  </div>
+</main>
+
+<main id="tab-trades" hidden>
+  <div id="trades-summary" class="trades-summary">
+    <div class="stat"><span class="label">Orders placed</span><span class="value" id="t-total">—</span></div>
+    <div class="stat"><span class="label">Filled</span><span class="value" id="t-filled">—</span></div>
+    <div class="stat"><span class="label">Settled</span><span class="value" id="t-settled">—</span></div>
+    <div class="stat"><span class="label">Win rate</span><span class="value" id="t-winrate">—</span></div>
+    <div class="stat"><span class="label">Realized P&amp;L</span><span class="value" id="t-pnl">—</span><span class="subline" id="t-pnl-sub"></span></div>
+    <div class="stat"><span class="label">Open notional</span><span class="value" id="t-open">—</span></div>
+    <div class="stat"><span class="label">Fees paid</span><span class="value" id="t-fees">—</span></div>
+    <div class="stat"><span class="label">Cash</span><span class="value" id="t-cash">—</span></div>
+  </div>
+
+  <div class="filters" id="trade-filters">
+    <span class="label">Bot</span>
+    <button class="filter-btn active" data-bot="selective">Selective</button>
+    <button class="filter-btn" data-bot="aggressive">Aggressive</button>
+  </div>
+
+  <table class="grid" id="trades-grid">
+    <thead>
+      <tr>
+        <th>When (ET)</th>
+        <th>Event</th>
+        <th>Strike</th>
+        <th>Side</th>
+        <th>×</th>
+        <th>Limit / Fill</th>
+        <th>Edge</th>
+        <th>Notional</th>
+        <th>Status</th>
+        <th>Outcome</th>
+        <th>P&amp;L</th>
+      </tr>
+    </thead>
+    <tbody id="trades-tbody">
+      <tr><td colspan="11" style="text-align:center; color:var(--fg-3); padding:24px;">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <div class="footer" style="margin-top:16px;">
+    P&amp;L is bot-only and per-order: computed from this order's own fills and
+    the market's outcome, never from Kalshi's aggregate settlement (which would
+    include any manual trades you placed by hand on the same market). "—" means
+    the order didn't fill, the market hasn't settled, or it's a sell leg
+    (sell P&amp;L belongs to the originating buy).
+  </div>
+</main>
+
+<main id="tab-guide" hidden>
+  <article class="guide">
+    <h1>How this thing works</h1>
+    <p class="lede">A dashboard for finding moments when the price of a Ethereum bet on Kalshi looks too cheap (or too expensive) compared to a simple statistical estimate of fair value. It points out the disagreement — you decide whether to act on it.</p>
+
+    <h2>First, what's the bet?</h2>
+    <p><a href="https://kalshi.com" target="_blank" rel="noopener">Kalshi</a> sells contracts that look like this:</p>
+    <div class="callout">
+      <strong>"Will ETH be above $80,000 at 6:00 PM today?"</strong><br/>
+      If yes → the contract pays $1.<br/>
+      If no → it pays $0.
+    </div>
+    <p>You can buy these contracts (called "YES") any time before the deadline. People also buy and sell them while the hour is running, so the price moves around like a stock. The price floats between 1¢ and 99¢, and you can read that price as a <strong>probability</strong>: a YES contract trading at 70¢ means the market collectively thinks there's roughly a 70% chance that contract pays out.</p>
+    <p>Kalshi runs about <strong>190 of these contracts every hour</strong>, one per strike — $80,000, $80,100, $80,200, and so on. Each row of the table is one contract.</p>
+
+    <h2>YES vs. NO — same coin, two sides</h2>
+    <p>Every contract has two sides. If a YES contract costs 70¢, the matching NO contract costs about 30¢ (they have to add up to ~$1, since exactly one of them will win).</p>
+    <ul>
+      <li>Buy <span class="pill-demo yes">Yes 70¢</span> → win $1 if ETH closes above the strike. Net profit: 30¢.</li>
+      <li>Buy <span class="pill-demo no">No 30¢</span> → win $1 if ETH closes at or below the strike. Net profit: 70¢.</li>
+    </ul>
+    <p>Buying NO is exactly the same bet as betting against YES. Different label, same trade.</p>
+
+    <h2>What does this dashboard add?</h2>
+    <p>Kalshi already shows you what <em>the market</em> thinks the chance is — that's just the YES price. This dashboard does one extra thing: it computes its own estimate of the probability and puts it next to the market's number. When the two disagree by a lot, that's a signal worth investigating.</p>
+    <p>If the market is selling YES for 50¢ but our model thinks it's worth 56¢, we're saying:</p>
+    <div class="callout">
+      <em>"I think this $1 ticket is worth 56¢. They're selling it for 50¢. If I'm right, I'm getting it 6¢ cheaper than fair."</em>
+    </div>
+    <p>That 6¢ gap is the <strong>edge</strong> column.</p>
+
+    <h2>How does the model decide?</h2>
+    <p>It only uses three ingredients:</p>
+    <ol>
+      <li><strong>How jumpy has ETH been recently?</strong> We look at the last hour of one-minute price data and measure how big the wiggles have been. Bigger wiggles → bigger possible future moves. (You'll see this in the header as <strong>σ</strong>, pronounced "sigma" — that's the formal name. Don't worry about the symbol, just think "jumpiness, in percent per year.")</li>
+      <li><strong>How much time is left?</strong> More time = more chances to drift away from the current price. A $500 move is unlikely in 30 seconds, plausible in 30 minutes.</li>
+      <li><strong>How far is the strike from where ETH is right now?</strong> A strike $200 below the current price is much easier to clear than one $500 above.</li>
+    </ol>
+    <p>Combine those three and you get a probability for each strike — basically, "given that ETH has been wiggling this much, and there's this much time left, what fraction of plausible paths land above the line?" Multiply that probability by $1 and you have the model's idea of fair value.</p>
+    <p>That's it. There's no AI, no chart-pattern recognition, no news scraping. Just <em>recent price wiggle + time + distance</em>, fed through a textbook formula that mathematicians have been using on stocks since the 1970s.</p>
+
+    <h2>The big thing the model doesn't know</h2>
+    <p>The model is <strong>direction-agnostic</strong>. It assumes the next move is equally likely up or down — it only has a view on <em>how big</em> moves can be, not <em>which way</em>. That's deliberate: making no directional guess is hard to overfit and easy to reason about.</p>
+    <p>But it's also where the model is wrong: <strong>if ETH is in a clear, sustained trend, the market knows and the model doesn't</strong>. So if you see all the strikes above the current price flagging "Buy YES" and all the strikes below flagging "Buy NO," that's almost always not real edge — it's the market correctly pricing in a trend that our model is ignoring.</p>
+
+    <h2>Reading the columns</h2>
+    <table>
+      <thead><tr><th style="width:18%">Column</th><th>What it means</th></tr></thead>
+      <tbody>
+        <tr><td>Strike</td><td>The line in the sand for this row. <code>$80,000 or above</code> means the bet is "ETH closes above $80,000."</td></tr>
+        <tr><td>Chance</td><td>What the market collectively thinks the chance is, as a percent. Same number Kalshi shows under "Chance".</td></tr>
+        <tr><td>Model</td><td>What <em>our</em> model thinks the chance is. <strong>This is the column Kalshi doesn't show you</strong> — it's the whole point of this page.</td></tr>
+        <tr><td>Yes</td><td><span class="pill-demo yes">Yes 70¢</span> — what you'd pay <em>right now</em> to buy a YES contract.</td></tr>
+        <tr><td>No</td><td><span class="pill-demo no">No 30¢</span> — what you'd pay right now to buy a NO contract.</td></tr>
+        <tr><td>Edge</td><td>The gap between Model and Market, in cents. Green = model thinks YES is too cheap; red = too expensive.</td></tr>
+        <tr><td>Action</td><td>What we'd do if we acted on this row right now: <code>Buy YES +6.2¢</code>, <code>Buy NO +4.1¢</code>, or just <code>—</code> if the gap is too small to bother.</td></tr>
+        <tr><td>Size</td><td>How many contracts are sitting at the current bid + ask. Below ~100 is thin — there might not be much volume to trade against.</td></tr>
+        <tr><td>Ticker</td><td>The full Kalshi ID for this contract. Copy this to find the same market on Kalshi.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The header at the top</h2>
+    <table>
+      <thead><tr><th>Field</th><th>What it tells you</th></tr></thead>
+      <tbody>
+        <tr><td>Big ETH price</td><td>The current Ethereum price (from Coinbase). Updates every second or two.</td></tr>
+        <tr><td>Ethereum price today at 6pm EDT</td><td>Which hourly bet you're looking at. Each hour has its own contracts. Matches Kalshi's market title verbatim.</td></tr>
+        <tr><td>σ (60M, ann.)</td><td>How jumpy ETH has been in the last 60 minutes, expressed as an annualized percent. <strong>Below 25%: ETH is calm; the model's signals are mostly noise.</strong> Above 50%: ETH is moving; signals are more meaningful.</td></tr>
+        <tr><td>Time to close</td><td>Minutes:seconds until trading halts for this hour and the contracts settle.</td></tr>
+        <tr><td>Edge threshold</td><td>The minimum disagreement we need before we flag a row.</td></tr>
+        <tr><td>Last poll</td><td>How fresh the data is. Goes yellow if it's been more than 90 seconds (something might be stuck).</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The filter buttons</h2>
+    <ul>
+      <li><strong>All</strong> — show every strike (~190).</li>
+      <li><strong>ITM</strong> — strikes <em>below</em> the current price. YES is currently winning on these.</li>
+      <li><strong>ATM ±$500</strong> — strikes near the current price. The most active region.</li>
+      <li><strong>OTM</strong> — strikes <em>above</em> the current price. YES is currently losing on these.</li>
+      <li><strong>Flagged</strong> — only rows where the disagreement is big enough to act on. <em>If this number is 0, there's nothing to do right now.</em></li>
+    </ul>
+
+    <h2>When the model actually works (and when it doesn't)</h2>
+    <p>This is the most important section. Same edge number, totally different reliability depending on conditions:</p>
+    <div class="callout">
+      <strong>The model tends to be right when:</strong>
+      <ul style="margin-top:6px;">
+        <li>ETH has been moving a lot in the last hour (σ above ~50% in the header)</li>
+        <li>The strike is well away from the current price (more than ~$300 in either direction)</li>
+        <li>The YES price is cheap (under ~30¢)</li>
+        <li>There's still 15+ minutes until close</li>
+      </ul>
+      Why: when ETH is moving fast, the market often under-prices "long-shot" outcomes. Buying a 12¢ YES that the model thinks is worth 28¢ is a $1-payoff lottery ticket bought at a discount. Even when most of those expire worthless, the occasional $1 win pays for the rest.
+    </div>
+    <div class="callout" style="border-left-color: var(--red);">
+      <strong>The model tends to be wrong when:</strong>
+      <ul style="margin-top:6px;">
+        <li>ETH has been quiet (σ below ~25%)</li>
+        <li>The strike is right at the current price (within ~$50)</li>
+        <li>There are only a few minutes until close</li>
+        <li>ETH is in a clear directional trend</li>
+      </ul>
+      Why: in calm markets the market correctly expects ETH to "pin" near the current price for the rest of the hour, and our model's "edges" come from noise in the recent-hour wiggle measurement. The fees plus the 1¢-tick floor eat the trade.
+    </div>
+
+    <h2>The workflow</h2>
+    <ol>
+      <li>Open this page next to Kalshi (the actual betting site).</li>
+      <li>Click <strong>Flagged</strong>. If the number is 0, nothing to do — close the tab and come back later.</li>
+      <li>If something's flagged, ask:
+        <ul>
+          <li>Is ETH moving (σ above ~50%)? Is the strike well away from spot? Is YES cheap? Is there 15+ minutes to go? <em>If yes to all four, this is a real signal.</em></li>
+          <li>Has the same edge been flagging for more than two refreshes? Brief flickers are usually bid/ask jitter, not edge.</li>
+          <li>Is there decent <strong>Size</strong> behind the price (more than ~100)? If only 5 contracts are sitting there, you can't really trade it.</li>
+        </ul>
+      </li>
+      <li>If you decide it's real: copy the <strong>Ticker</strong> from the right column → paste into Kalshi search → place the order on Kalshi by hand. <em>This dashboard never places trades for you.</em></li>
+    </ol>
+
+    <h2>Things that look like edge but aren't</h2>
+    <ul>
+      <li><strong>Strikes way out at the edges</strong> — when the model says "0.001% chance" but Kalshi can't quote below 1¢, the apparent "+0.5¢ edge" is a rounding artifact.</li>
+      <li><strong>Symmetric bias around spot</strong> — every strike below the price flagging Buy NO and every strike above flagging Buy YES means ETH is trending and our model is fighting the trend. Skip.</li>
+      <li><strong>One strike flagging, neighbors don't</strong> — usually a stale resting order or pulled quote. Sometimes worth investigating, but check Size first.</li>
+      <li><strong>Big edges right after launch</strong> — the σ measurement uses the last 60 minutes; if the engine just started, the most recent minute is partial and σ is unreliable for the first 5 minutes or so.</li>
+    </ul>
+
+    <h2>Caveats baked into the design</h2>
+    <ul>
+      <li><strong>ETH price source.</strong> Kalshi settles based on the CF Benchmarks ERTI rate (an average across six exchanges); we use Coinbase as a proxy. Under stress these can drift by a few dollars, so very small edges (under ~$10 of ETH distance) may just be the gap between the two feeds.</li>
+      <li><strong>Final 60 seconds.</strong> Kalshi doesn't settle on the last-second price — it averages ETH over the final 60 seconds. Our model knows about this and adjusts in the final minute, but signals inside the last minute should be treated cautiously.</li>
+      <li><strong>No directional view.</strong> See "What the model doesn't know" above.</li>
+    </ul>
+  </article>
+</main>
+
+<script>
+const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
+const fmtPctInt = n => n == null ? "—" : Math.round(n * 100) + "%";
+const fmtCents = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(1) + "¢";
+const fmtMin = n => {
+  if (n == null) return "—";
+  const totalSec = Math.max(0, Math.floor(n * 60));
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return mm + ":" + String(ss).padStart(2, "0");
+};
+const strikeLabel = strike => "above $" + Math.ceil(strike).toLocaleString();
+const yesPill = ask => ask == null
+  ? '<span class="pill yes mute">Yes —</span>'
+  : '<span class="pill yes">Yes ' + Math.round(ask * 100) + '¢</span>';
+const noPill = bid => bid == null
+  ? '<span class="pill no mute">No —</span>'
+  : '<span class="pill no">No ' + Math.round((1 - bid) * 100) + '¢</span>';
+
+let lastTs = 0;
+let closeTsMs = null;
+let currentFilter = "atm";
+const ATM_BAND = 500;  // dollars either side of spot for the ATM filter
+
+// Animation helpers (Motion One). All no-ops when prefers-reduced-motion or
+// the CDN failed to load — animations are pure polish, never required for
+// correctness.
+const _M = (typeof Motion !== "undefined") ? Motion : null;
+const _reducedMotion = window.matchMedia &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const _animate = (el, kf, opts) => {
+  if (!_M || _reducedMotion || !el) return { finished: Promise.resolve() };
+  return _M.animate(el, kf, opts);
+};
+
+// Tabs — cross-fade panels instead of snapping hidden on/off.
+const _PANELS = ["live", "trades", "guide"];
+function switchTab(target) {
+  const visible = _PANELS.find(p => !document.getElementById("tab-" + p).hidden);
+  if (visible === target) return;
+  const outEl = document.getElementById("tab-" + visible);
+  const inEl  = document.getElementById("tab-" + target);
+  const reveal = () => {
+    outEl.hidden = true;
+    outEl.style.opacity = ""; outEl.style.transform = "";
+    inEl.hidden = false;
+    if (target === "trades") refreshTrades();
+    _animate(inEl, { opacity: [0, 1], transform: ["translateY(6px)", "translateY(0)"] },
+      { duration: 0.22, easing: [0.2, 0, 0, 1] });
+  };
+  _animate(outEl, { opacity: [1, 0], transform: ["translateY(0)", "translateY(4px)"] },
+    { duration: 0.12, easing: "ease-out" }).finished.then(reveal, reveal);
+}
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    switchTab(tab.dataset.tab);
+  });
+});
+
+// Bot filter (selective vs aggressive — different bot profiles, different DBs)
+let selectedBot = "selective";
+document.querySelectorAll('[data-bot]').forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll('[data-bot]').forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    selectedBot = btn.dataset.bot;
+    refreshTrades();
+  });
+});
+
+document.querySelectorAll('[data-filter]').forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll('[data-filter]').forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentFilter = btn.dataset.filter;
+    refresh();
+  });
+});
+
+function strikeMatchesFilter(s, spot, threshold) {
+  if (currentFilter === "all") return true;
+  if (currentFilter === "itm") return s.strike < spot;
+  if (currentFilter === "otm") return s.strike >= spot;
+  if (currentFilter === "atm") return Math.abs(s.strike - spot) <= ATM_BAND;
+  if (currentFilter === "flagged") {
+    const a = actionFor(s, threshold);
+    return a.side !== "NONE";
+  }
+  return true;
+}
+
+function actionFor(s, threshold) {
+  if (s.yes_ask != null) {
+    const buy = s.model_prob * 100 - s.yes_ask * 100;
+    const sell = s.yes_bid != null ? s.yes_bid * 100 - s.model_prob * 100 : -Infinity;
+    if (buy > threshold && buy >= sell) return {side: "BUY_YES", cents: buy};
+    if (sell > threshold)               return {side: "SELL_YES", cents: sell};
+  }
+  return {side: "NONE", cents: 0};
+}
+
+function classifyRow(s, threshold) {
+  const a = actionFor(s, threshold);
+  if (a.side === "BUY_YES")  return "buy";
+  if (a.side === "SELL_YES") return "sell";
+  return "";
+}
+
+async function refresh() {
+  let resp, data;
+  try {
+    resp = await fetch("/api/state", {cache: "no-store"});
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById("status").textContent = "Error fetching state: " + e;
+    return;
+  }
+  if (!data.ready) {
+    document.getElementById("status").textContent =
+      "Waiting for first poll… (it can take up to 30 s after start).";
+    return;
+  }
+  document.getElementById("status").style.display = "none";
+  document.getElementById("grid").style.display = "";
+  document.getElementById("filters").style.display = "";
+
+  const flashIf = (id, value, formatter) => {
+    const el = document.getElementById(id);
+    const newText = formatter(value);
+    if (el.textContent !== newText) {
+      el.textContent = newText;
+      el.parentElement.classList.remove("flash");
+      void el.offsetWidth;
+      el.parentElement.classList.add("flash");
+    }
+  };
+
+  flashIf("event",  data.event_title || data.event_ticker, v => v);
+  flashIf("spot",   data.spot,         fmtMoney);
+  flashIf("sigma",  data.sigma,        fmtPct);
+  // Color sigma against the engine's BUY_GATE_MIN_SIGMA (0.50). Below it,
+  // BUY_YES / BUY_NO entries are blocked regardless of edge — this is why
+  // the bot can sit idle for hours during calm regimes.
+  const sigEl = document.getElementById("sigma");
+  const sigSub = document.getElementById("sigma-gate");
+  if (data.sigma == null) {
+    sigEl.classList.remove("pos", "neg");
+    sigSub.textContent = "buy gate ≥50%";
+  } else if (data.sigma >= 0.50) {
+    sigEl.classList.add("pos"); sigEl.classList.remove("neg");
+    sigSub.textContent = "buy gate: open";
+  } else {
+    sigEl.classList.add("neg"); sigEl.classList.remove("pos");
+    sigSub.textContent = "buy gate: blocked (≥50%)";
+  }
+  closeTsMs = data.ts_ms + data.minutes_left * 60000;
+  tickClose();
+  document.getElementById("thresh").textContent = "±" + data.threshold_cents.toFixed(1) + "¢";
+
+  const ageSec = Math.max(0, (Date.now() - data.ts_ms) / 1000);
+  document.getElementById("age").textContent = ageSec < 60 ? ageSec.toFixed(0) + "s ago" : (ageSec / 60).toFixed(1) + "m ago";
+  document.body.classList.toggle("stale", ageSec > 90);
+
+  // Render rows. Highlight ATM band by spot proximity, apply filter.
+  const tbody = document.getElementById("tbody");
+  const out = [];
+  const threshold = data.threshold_cents;
+  const counts = {all: 0, itm: 0, atm: 0, otm: 0, flagged: 0};
+  for (const s of data.strikes) {
+    counts.all += 1;
+    if (s.strike < data.spot) counts.itm += 1;
+    if (s.strike >= data.spot) counts.otm += 1;
+    if (Math.abs(s.strike - data.spot) <= ATM_BAND) counts.atm += 1;
+    if (actionFor(s, threshold).side !== "NONE") counts.flagged += 1;
+
+    if (!strikeMatchesFilter(s, data.spot, threshold)) continue;
+
+    const a = actionFor(s, threshold);
+    const cls = classifyRow(s, threshold);
+    const atm = Math.abs(s.strike - data.spot) < 250 ? "atm" : "";
+    const cold = (s.yes_bid == null && s.yes_ask == null) ? "cold" : "";
+    const mid = (s.yes_bid != null && s.yes_ask != null) ? (s.yes_bid + s.yes_ask) / 2 : null;
+    const liq = (s.yes_bid_size || 0) + (s.yes_ask_size || 0);
+    out.push(`
+      <tr class="${[cls, atm, cold].filter(Boolean).join(" ")}">
+        <td class="strike-label">${strikeLabel(s.strike)}</td>
+        <td>${fmtPctInt(mid)}</td>
+        <td>${fmtPctInt(s.model_prob)}</td>
+        <td class="pill-cell">${yesPill(s.yes_ask)}</td>
+        <td class="pill-cell">${noPill(s.yes_bid)}</td>
+        <td class="${s.edge_cents > 0 ? 'pos' : s.edge_cents < 0 ? 'neg' : ''}">${fmtCents(s.edge_cents)}</td>
+        <td class="action ${a.side}">${a.side === "NONE" ? "—" : (a.side === "BUY_YES" ? "Buy YES" : "Buy NO") + " +" + a.cents.toFixed(1) + "¢"}</td>
+        <td>${liq ? liq.toFixed(0) : "—"}</td>
+        <td class="market-ticker">${s.market_ticker}</td>
+      </tr>
+    `);
+  }
+  tbody.innerHTML = out.join("");
+  for (const [k, v] of Object.entries(counts)) {
+    const el = document.getElementById("count-" + k);
+    if (el) el.textContent = v;
+  }
+  lastTs = data.ts_ms;
+}
+
+function tickClose() {
+  if (closeTsMs == null) return;
+  const remainingMin = (closeTsMs - Date.now()) / 60000;
+  const el = document.getElementById("ttl");
+  const newText = fmtMin(remainingMin);
+  if (el.textContent !== newText) el.textContent = newText;
+}
+
+async function refreshSpot() {
+  try {
+    const resp = await fetch("/api/spot", {cache: "no-store"});
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const el = document.getElementById("spot");
+    const newText = fmtMoney(data.price);
+    if (el.textContent !== newText) {
+      el.textContent = newText;
+      el.parentElement.classList.remove("flash");
+      void el.offsetWidth;
+      el.parentElement.classList.add("flash");
+    }
+  } catch (e) {
+    /* silent — next tick retries */
+  }
+}
+
+// ---- Trades tab ----
+const fmtSignedUsd = n => {
+  if (n == null) return "—";
+  const sign = n >= 0 ? "+" : "−";
+  return sign + "$" + Math.abs(n).toFixed(2);
+};
+const strikeFromTicker = mt => {
+  const last = (mt || "").split("-").pop() || "";
+  if (!last.startsWith("T")) return last;
+  const n = parseFloat(last.slice(1));
+  return isNaN(n) ? last : "above $" + Math.ceil(n).toLocaleString();
+};
+const eventLabel = et => {
+  // KXETHD-26MAY0222 → "MAY 02 10 PM"
+  const m = (et || "").match(/^KXETHD-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
+  if (!m) return et || "—";
+  const h = parseInt(m[4], 10);
+  const h12 = (h % 12) || 12;
+  const ampm = h < 12 ? "AM" : "PM";
+  return `${m[2]} ${m[3]} ${h12} ${ampm}`;
+};
+const fmtTimeEt = ts_ms => {
+  const d = new Date(ts_ms);
+  // Render in America/New_York; Intl handles DST.
+  const opts = { timeZone: "America/New_York", month: "2-digit", day: "2-digit",
+                 hour: "numeric", minute: "2-digit", hour12: true };
+  return new Intl.DateTimeFormat("en-US", opts).format(d);
+};
+
+async function refreshTrades() {
+  let resp, data;
+  try {
+    resp = await fetch(`/api/trades?bot=${encodeURIComponent(selectedBot)}&limit=100`,
+                       {cache: "no-store"});
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById("trades-tbody").innerHTML =
+      `<tr><td colspan="11" style="text-align:center; color:var(--red); padding:24px;">Error: ${e}</td></tr>`;
+    return;
+  }
+  const s = data.summary || {};
+  const cash = s.cash_balance_cents == null ? null : s.cash_balance_cents / 100;
+  document.getElementById("t-total").textContent   = s.total_orders ?? "—";
+  document.getElementById("t-filled").textContent  = (s.filled ?? 0) + " / " + (s.total_orders ?? 0);
+  document.getElementById("t-settled").textContent = (s.settled_markets ?? 0) + " market" + ((s.settled_markets ?? 0) === 1 ? "" : "s");
+  document.getElementById("t-winrate").textContent =
+    s.win_rate == null ? `— (${s.won ?? 0}W / ${s.lost ?? 0}L)`
+                       : `${(s.win_rate * 100).toFixed(0)}% (${s.won}W / ${s.lost}L)`;
+  const pnlEl = document.getElementById("t-pnl");
+  pnlEl.textContent = fmtSignedUsd(s.realized_pnl_usd);
+  pnlEl.className = "value " + (s.realized_pnl_usd > 0 ? "pos" : s.realized_pnl_usd < 0 ? "neg" : "");
+  const pnlSubEl = document.getElementById("t-pnl-sub");
+  const cap = s.allocated_capital_usd;
+  if (cap && cap > 0 && s.realized_pnl_usd != null) {
+    const pct = (s.realized_pnl_usd / cap) * 100;
+    const sign = pct >= 0 ? "+" : "−";
+    pnlSubEl.textContent = `${sign}${Math.abs(pct).toFixed(1)}% on $${cap.toFixed(0)} allocated`;
+  } else {
+    pnlSubEl.textContent = "";
+  }
+  document.getElementById("t-open").textContent  = s.open_notional_usd == null ? "—" : "$" + s.open_notional_usd.toFixed(2);
+  document.getElementById("t-fees").textContent  = s.fees_paid_usd == null ? "—" : "$" + s.fees_paid_usd.toFixed(2);
+  document.getElementById("t-cash").textContent  = cash == null ? "—" : "$" + cash.toFixed(2);
+
+  const tbody = document.getElementById("trades-tbody");
+  const trades = data.trades || [];
+  if (!trades.length) {
+    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--fg-3); padding:24px;">No ${selectedBot} orders yet.</td></tr>`;
+    return;
+  }
+  const rows = trades.map(t => {
+    const when = fmtTimeEt(t.ts_ms);
+    const ev = eventLabel(t.event_ticker);
+    const strike = strikeFromTicker(t.market_ticker);
+    const sideLabel = (t.action.toUpperCase() === "BUY" ? "Buy " : "Sell ") + t.side.toUpperCase();
+    const sideClass = t.side === "yes" && t.action === "buy" ? "action BUY_YES"
+                      : t.side === "yes" && t.action === "sell" ? "action SELL_YES" : "action";
+    let priceCell;
+    if (t.fill_price_cents != null) {
+      const lp = t.limit_price_cents;
+      const fp = t.fill_price_cents;
+      priceCell = `${lp}¢ / <strong>${fp}¢</strong>`;
+    } else {
+      priceCell = `${t.limit_price_cents}¢ / —`;
+    }
+    const edgeCls = t.edge_cents > 0 ? "pos" : t.edge_cents < 0 ? "neg" : "";
+    const edgeStr = (t.edge_cents >= 0 ? "+" : "") + t.edge_cents.toFixed(1) + "¢";
+    let outcomeCell, outcomeCls;
+    if (t.settled) {
+      const won = t.market_result === t.side;
+      outcomeCell = won ? "WON" : "LOST";
+      outcomeCls = won ? "outcome-won" : "outcome-lost";
+    } else if (t.status === "submitted") {
+      outcomeCell = t.fill_price_cents != null ? "open" : "resting";
+      outcomeCls = "outcome-open";
+    } else {
+      outcomeCell = t.status;
+      outcomeCls = "muted";
+    }
+    let pnlCell, pnlCls;
+    if (t.order_pnl_usd != null) {
+      pnlCell = fmtSignedUsd(t.order_pnl_usd);
+      pnlCls = t.order_pnl_usd > 0 ? "pnl-pos" : t.order_pnl_usd < 0 ? "pnl-neg" : "";
+    } else {
+      pnlCell = "—";
+      pnlCls = "muted";
+    }
+    return `
+      <tr>
+        <td>${when}</td>
+        <td>${ev}</td>
+        <td>${strike}<div class="ticker-mini">${t.market_ticker}</div></td>
+        <td class="${sideClass}">${sideLabel}</td>
+        <td>${t.count}</td>
+        <td>${priceCell}</td>
+        <td class="${edgeCls}">${edgeStr}</td>
+        <td>$${(t.notional_usd || 0).toFixed(2)}</td>
+        <td>${t.status}</td>
+        <td class="${outcomeCls}">${outcomeCell}</td>
+        <td class="${pnlCls}">${pnlCell}</td>
+      </tr>`;
+  });
+  tbody.innerHTML = rows.join("");
+  // Stagger-in rows so a refresh feels like a soft fill rather than a snap.
+  if (_M && !_reducedMotion) {
+    const tr = tbody.querySelectorAll("tr");
+    if (tr.length) {
+      _M.animate(tr, { opacity: [0, 1], transform: ["translateY(4px)", "translateY(0)"] },
+        { duration: 0.18, delay: _M.stagger(0.012), easing: [0.2, 0, 0, 1] });
+    }
+  }
+}
+
+refresh();
+refreshSpot();
+setInterval(refresh, 2000);
+setInterval(refreshSpot, 1500);
+setInterval(tickClose, 1000);
+// Refresh trades data periodically when the tab is open. Cheap when hidden
+// because we only fetch on tab activation; this just keeps it fresh while
+// the user is looking at it.
+setInterval(() => {
+  if (!document.getElementById("tab-trades").hidden) refreshTrades();
+}, 15000);
+
+// Boot: gentle fade-up of the chrome on first paint.
+if (_M && !_reducedMotion) {
+  const bootEls = [
+    document.querySelector(".asset-switcher"),
+    document.querySelector(".hero"),
+    document.getElementById("tabs"),
+    document.getElementById("tab-live"),
+  ].filter(Boolean);
+  bootEls.forEach(el => { el.style.opacity = "0"; });
+  requestAnimationFrame(() => {
+    _M.animate(bootEls,
+      { opacity: [0, 1], transform: ["translateY(6px)", "translateY(0)"] },
+      { duration: 0.32, delay: _M.stagger(0.05), easing: [0.2, 0, 0, 1] });
+  });
+}
+</script>
+
+</body>
+</html>
