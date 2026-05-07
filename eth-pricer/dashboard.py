@@ -291,7 +291,7 @@ def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
         s = summarize(db, trader, mode="live")
     profile = BOT_PROFILES.get(bot)
     if profile is not None:
-        s["allocated_capital_usd"] = profile.max_notional_usd
+        s["max_notional_pct"] = profile.max_notional_pct
     return JSONResponse({"trades": trades, "summary": s, "bot": bot})
 
 

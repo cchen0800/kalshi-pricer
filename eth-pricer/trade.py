@@ -66,12 +66,19 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def confirm_live(profile: BotProfile) -> bool:
+def confirm_live(profile: BotProfile, balance_usd: float | None = None) -> bool:
     print("=" * 70)
     print(f"LIVE TRADING — REAL MONEY  [profile: {profile.bot_id}]")
     print("=" * 70)
-    print(f"  Max notional outstanding: ${profile.max_notional_usd:.2f}")
-    print(f"  Max daily realized loss:  ${profile.max_daily_loss_usd:.2f}")
+    if balance_usd is not None:
+        print(f"  Portfolio balance:        ${balance_usd:.2f}")
+        notional = profile.max_notional_pct * balance_usd
+        loss = profile.max_daily_loss_pct * balance_usd
+        print(f"  Max notional outstanding: {profile.max_notional_pct:.0%} = ${notional:.2f}")
+        print(f"  Max daily realized loss:  {profile.max_daily_loss_pct:.0%} = ${loss:.2f}")
+    else:
+        print(f"  Max notional outstanding: {profile.max_notional_pct:.0%} of portfolio")
+        print(f"  Max daily realized loss:  {profile.max_daily_loss_pct:.0%} of portfolio")
     print(f"  Min edge to act:          {profile.min_edge_cents:.1f}¢")
     print(f"  Stop trading at:          T-{MIN_MINUTES_TO_CLOSE:.1f}min before close")
     print(f"  Kill switch:              touch {profile.kill_file}")
@@ -96,8 +103,18 @@ def main() -> int:
     cfg: EngineConfig = load_config(cfg_path)
     log.info("profile=%s db=%s", profile.bot_id, cfg.db_path)
 
+    trader: KalshiTrader | None = None
+    balance_usd: float | None = None
+    if args.live:
+        trader = KalshiTrader()
+        bal = trader.get_balance()
+        balance_usd = (bal.get("balance", 0) + bal.get("portfolio_value", 0)) / 100.0
+        log.info("kalshi balance: %s (portfolio $%.2f)", bal, balance_usd)
+
     if args.live and not args.yes_i_know:
-        if not confirm_live(profile):
+        if not confirm_live(profile, balance_usd):
+            if trader is not None:
+                trader.close()
             print("aborted")
             return 1
 
@@ -109,7 +126,6 @@ def main() -> int:
             profile.bot_id,
         )
 
-    trader: KalshiTrader | None = None
     # Read-only client for the settlement scraper. Engine has its own internal
     # client for poll fetches; this one's lifecycle is independent so the
     # scraper can run inside the on_poll callback without coupling to engine.
@@ -130,10 +146,6 @@ def main() -> int:
         command_handlers={"pnl": _pnl, "trades": _trades},
     )
     try:
-        if args.live:
-            trader = KalshiTrader()
-            bal = trader.get_balance()
-            log.info("kalshi balance: %s", bal)
 
         if not args.no_telegram_listen:
             kill_listener.start()

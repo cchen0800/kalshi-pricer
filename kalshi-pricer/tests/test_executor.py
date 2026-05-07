@@ -26,6 +26,9 @@ from src.executor import (
     Executor,
 )
 
+# Synthetic portfolio balance for tests; effective caps derive from pct × this.
+TEST_PORTFOLIO_USD = 1000.0
+
 # Test-only profile: same risk knobs as selective but with the legacy side
 # policy (BUY_YES allowed, no BUY_NO). The production selective profile now
 # runs the BUY_NO entry policy (PR #3), but these executor-mechanic tests
@@ -36,15 +39,15 @@ def _legacy_profile(*, kill_path: Path | None = None) -> BotProfile:
     return BotProfile(
         bot_id=base.bot_id,
         coid_prefix=base.coid_prefix,
-        max_notional_usd=base.max_notional_usd,
-        max_daily_loss_usd=base.max_daily_loss_usd,
+        max_notional_pct=base.max_notional_pct,
+        max_daily_loss_pct=base.max_daily_loss_pct,
         min_edge_cents=base.min_edge_cents,
         kill_file=kill_path or base.kill_file,
         # policy left at default (LEGACY_POLICY)
     )
 
-MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_usd
-MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_usd
+MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_pct * TEST_PORTFOLIO_USD
+MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_pct * TEST_PORTFOLIO_USD
 from src.positions import PositionSnapshot
 
 
@@ -145,10 +148,9 @@ def test_kill_file_blocks_orders(db, tmp_path):
 
 
 def test_notional_cap_caps_count(db, monkeypatch):
-    # $25 of $30 budget already open. Per-order cap is 5; per-strike room is 10.
-    # At 50c each, $5 budget → 10 contracts → capped to 5 by per-order.
+    # Most of the budget already open; at 50c each, only 5 contracts fit.
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=25.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 2.50,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
@@ -157,7 +159,7 @@ def test_notional_cap_caps_count(db, monkeypatch):
     assert d.placed is True
     assert d.ticket.count == 5
 
-    # $30 of $30 used → should block on notional.
+    # Full budget used → should block on notional.
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=MAX_NOTIONAL_USD,
         realized_pnl_today_usd=0.0,
@@ -244,7 +246,8 @@ def test_order_notification_escapes_markdown_specials(db, monkeypatch):
         def place_order(self, **kw):
             return {"order_id": "fecc03f0-4efb-4787-a639_with_underscores"}
 
-    ex = Executor(db, trader=FakeTrader(), live=True, notifier=FakeNotifier(), profile=_legacy_profile())
+    ex = Executor(db, trader=FakeTrader(), live=True, notifier=FakeNotifier(),
+                  profile=_legacy_profile(), portfolio_usd=TEST_PORTFOLIO_USD)
     stub_snapshot(monkeypatch, PositionSnapshot.empty() if hasattr(PositionSnapshot, "empty")
                   else PositionSnapshot(0.0, 0.0))
     row = make_row(market="KXBTCD-X-T1", model_prob=0.80, yes_ask=0.25, yes_bid=0.20)
@@ -331,11 +334,10 @@ def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
 
 
 def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
-    """Notional cap binds across YES + NO sides. With $29 already open and
-    $30 cap, only $1 budget left → at no_ask=5c that's 20 contracts of room,
-    but per-order cap is 5."""
+    """Notional cap binds across YES + NO sides. With most of the budget used,
+    at no_ask=5c some contracts still fit, capped by per-order max."""
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=29.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 1.0,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_selective_profile())
@@ -344,9 +346,9 @@ def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
     assert d.placed is True
     assert d.ticket.count == MAX_CONTRACTS_PER_ORDER
 
-    # $29.99 used → only $0.01 left, no contract fits at 5c.
+    # Budget exhausted → only $0.01 left, no contract fits at 5c.
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=29.99,
+        open_notional_usd=MAX_NOTIONAL_USD - 0.01,
         realized_pnl_today_usd=0.0,
     ))
     row2 = make_row(market="KXBTCD-OTHER-T1", model_prob=0.10, yes_bid=0.20,
@@ -365,7 +367,8 @@ def test_buy_no_live_posts_side_no(db, monkeypatch):
             return {"order_id": "abc-123"}
 
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
-    ex = Executor(db, trader=FakeTrader(), live=True, profile=_selective_profile())
+    ex = Executor(db, trader=FakeTrader(), live=True, profile=_selective_profile(),
+                  portfolio_usd=TEST_PORTFOLIO_USD)
     row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
     d = ex.handle_poll([row])
     assert d.placed is True
@@ -389,7 +392,7 @@ def test_buy_no_telegram_label(db, monkeypatch):
 
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
     ex = Executor(db, trader=FakeTrader(), live=True, notifier=FakeNotifier(),
-                  profile=_selective_profile())
+                  profile=_selective_profile(), portfolio_usd=TEST_PORTFOLIO_USD)
     row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
     ex.handle_poll([row])
     assert len(captured) == 1
@@ -423,12 +426,10 @@ def test_top_k_places_multiple_distinct_strikes(db, monkeypatch):
 def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
     """First placement consumes most of the notional cap; second candidate
     sized down or blocked by running notional, not the original snap."""
-    # Start with $20 of $30 used; $10 budget left. First buy at 60c × 5 = $3.
-    # After first ticket runs working_notional → $23. Second buy at 60c × 5 = $3
-    # ($23+3=$26, still under cap). Third buy ($26+3=$29). Fourth would push
-    # over so blocked.
+    # Budget: MAX_NOTIONAL - (MAX_NOTIONAL - 10) = $10 left.
+    # Each ticket at 60c × 5 = $3. So 3 tickets fit ($9), 4th pushes past.
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=20.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 10.0,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
@@ -438,15 +439,12 @@ def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
         for i in range(5)
     ]
     ex.handle_poll(rows)
-    # Each ticket is 5 × $0.60 = $3. Budget: $10. So 3 tickets fit ($9), 4th
-    # would push past cap. Confirm exactly 3 placed (and not capped earlier
-    # by MAX_ORDERS_PER_POLL=3 so the test still proves running-notional is
-    # consulted — bump K to verify; here both cap at 3 so it's coincident).
+    # Each ticket is 5 × $0.60 = $3. Budget: $10. So 3 tickets fit ($9).
+    # MAX_ORDERS_PER_POLL also caps at 3, which is coincident here.
     intents = list(db.execute(
         "SELECT market_ticker, count, limit_price_cents FROM intended_orders ORDER BY id"
     ))
     assert len(intents) == 3
-    # All three placed at full size.
     for _, count, _price in intents:
         assert count == 5
 

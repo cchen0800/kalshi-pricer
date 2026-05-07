@@ -104,35 +104,32 @@ ORDER_TTL_SECONDS = 3.0           # Native IOC: every BUY is priced AT the ask
 
 # Hard ceilings. Profile values are validated against these at import time;
 # a typo can never unlock more risk than the ceiling allows.
-_MAX_NOTIONAL_CEILING_USD = 30.0
-_MAX_DAILY_LOSS_CEILING_USD = 30.0
-_MIN_EDGE_FLOOR_CENTS = 2.0       # below this, fee + spread will eat the edge
+_MAX_NOTIONAL_CEILING_PCT = 1.0       # no profile can exceed 100% of portfolio
+_MAX_DAILY_LOSS_CEILING_PCT = 0.50    # no profile can lose >50% of portfolio/day
+_HARD_NOTIONAL_CEILING_USD = 500.0    # backstop: balance-fetch bug can't unlock infinite
+_HARD_DAILY_LOSS_CEILING_USD = 200.0
+_MIN_EDGE_FLOOR_CENTS = 2.0           # below this, fee + spread will eat the edge
+_BALANCE_CACHE_TTL_S = 30.0           # don't spam Kalshi in fast-poll (3s)
+_DRY_RUN_PORTFOLIO_USD = 1000.0       # synthetic balance for dry-run / tests
 
 
 @dataclass(frozen=True)
 class BotProfile:
     bot_id: str                   # tag written to intended_orders.bot_id
     coid_prefix: str              # 5-char prefix on client_order_id
-    max_notional_usd: float
-    max_daily_loss_usd: float
+    max_notional_pct: float       # fraction of portfolio balance
+    max_daily_loss_pct: float     # fraction of portfolio balance
     min_edge_cents: float         # NET-of-fee edge floor (see engine.actionable_edge)
     kill_file: Path
     policy: SidePolicy = LEGACY_POLICY  # which sides may be entered/closed
 
 
 BOT_PROFILES: dict[str, BotProfile] = {
-    # Selective: where the new BUY_NO strategy ships. Backtest on 5d/27 events
-    # showed all BUY_YES variants -EV; SELL-side alpha lives in BUY_NO entries
-    # (see project_calibrated_no_entry_plan). PR #4 wired the executor branch;
-    # PR #5 lowered the edge floor 8 → 3 to harvest the calibrated-SELL EV the
-    # backtest sweep located, with the calibrated mp band gate (in engine.py)
-    # protecting against acting on extreme-tail probabilities the calibrator
-    # is fit on too few samples to estimate accurately.
     "selective": BotProfile(
         bot_id="eth-selective",
         coid_prefix="ethp-",      # legacy prefix; do not change (existing live history)
-        max_notional_usd=10.0,
-        max_daily_loss_usd=10.0,
+        max_notional_pct=0.33,
+        max_daily_loss_pct=0.10,
         min_edge_cents=3.0,
         kill_file=Path(".kill"),  # legacy
         policy=SidePolicy(
@@ -141,16 +138,11 @@ BOT_PROFILES: dict[str, BotProfile] = {
             sell_yes_to_close_only=True,
         ),
     ),
-    # Aggressive: keeps the legacy BUY_YES policy as the canary running the
-    # pre-PR-#3 strategy. Lets us A/B observe whether the SELL-edge signal
-    # the analysis was based on continues to hold while selective transitions
-    # to BUY_NO. Capped smaller than selective so a bad day can't drain the
-    # whole bankroll.
     "aggressive": BotProfile(
         bot_id="eth-aggressive",
         coid_prefix="etha-",
-        max_notional_usd=10.0,
-        max_daily_loss_usd=10.0,
+        max_notional_pct=0.33,
+        max_daily_loss_pct=0.10,
         min_edge_cents=3.0,
         kill_file=Path(".kill.aggressive"),
         policy=LEGACY_POLICY,
@@ -158,15 +150,15 @@ BOT_PROFILES: dict[str, BotProfile] = {
 }
 
 for _name, _p in BOT_PROFILES.items():
-    if _p.max_notional_usd > _MAX_NOTIONAL_CEILING_USD:
+    if _p.max_notional_pct > _MAX_NOTIONAL_CEILING_PCT:
         raise ValueError(
-            f"profile {_name!r} max_notional_usd={_p.max_notional_usd} "
-            f"exceeds ceiling {_MAX_NOTIONAL_CEILING_USD}"
+            f"profile {_name!r} max_notional_pct={_p.max_notional_pct} "
+            f"exceeds ceiling {_MAX_NOTIONAL_CEILING_PCT}"
         )
-    if _p.max_daily_loss_usd > _MAX_DAILY_LOSS_CEILING_USD:
+    if _p.max_daily_loss_pct > _MAX_DAILY_LOSS_CEILING_PCT:
         raise ValueError(
-            f"profile {_name!r} max_daily_loss_usd={_p.max_daily_loss_usd} "
-            f"exceeds ceiling {_MAX_DAILY_LOSS_CEILING_USD}"
+            f"profile {_name!r} max_daily_loss_pct={_p.max_daily_loss_pct} "
+            f"exceeds ceiling {_MAX_DAILY_LOSS_CEILING_PCT}"
         )
     if _p.min_edge_cents < _MIN_EDGE_FLOOR_CENTS:
         raise ValueError(
@@ -174,10 +166,6 @@ for _name, _p in BOT_PROFILES.items():
             f"below floor {_MIN_EDGE_FLOOR_CENTS}"
         )
 
-# Legacy aliases — module-level constants other files (trade.py, etc) may still
-# read. Keep pointing at the selective profile so the no-flag path is unchanged.
-MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_usd
-MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_usd
 MIN_EDGE_CENTS = BOT_PROFILES["selective"].min_edge_cents
 KILL_FILE = BOT_PROFILES["selective"].kill_file
 # --------------------------------------------------
@@ -222,6 +210,7 @@ class Executor:
         live: bool,
         notifier: TelegramNotifier | None = None,
         profile: BotProfile | None = None,
+        portfolio_usd: float | None = None,
     ) -> None:
         self.conn = conn
         self.trader = trader
@@ -229,6 +218,33 @@ class Executor:
         self.notifier = notifier
         self.profile = profile or BOT_PROFILES["selective"]
         self._order_times: collections.deque[float] = collections.deque(maxlen=MAX_ORDERS_PER_MINUTE)
+        self._override_portfolio_usd = portfolio_usd
+        self._cached_portfolio_usd: float | None = None
+        self._cached_portfolio_ts: float = 0.0
+
+    def _get_portfolio_usd(self) -> float:
+        if self._override_portfolio_usd is not None:
+            return self._override_portfolio_usd
+        if self.trader is None:
+            return _DRY_RUN_PORTFOLIO_USD
+        now = time.time()
+        if (
+            self._cached_portfolio_usd is not None
+            and now - self._cached_portfolio_ts < _BALANCE_CACHE_TTL_S
+        ):
+            return self._cached_portfolio_usd
+        try:
+            bal = self.trader.get_balance()
+            total = (bal.get("balance", 0) + bal.get("portfolio_value", 0)) / 100.0
+            self._cached_portfolio_usd = total
+            self._cached_portfolio_ts = now
+            log.debug("portfolio balance: $%.2f", total)
+            return total
+        except Exception:
+            log.warning("balance fetch failed, using cached value")
+            if self._cached_portfolio_usd is not None:
+                return self._cached_portfolio_usd
+            return _DRY_RUN_PORTFOLIO_USD
 
     def handle_poll(self, rows: list[PollRow]) -> Decision:
         # Guard: kill flag
@@ -249,12 +265,23 @@ class Executor:
         if snap is None:
             return Decision(False, "cannot read positions from Kalshi (fail-closed)")
 
+        # Compute effective dollar caps from portfolio balance × profile pct.
+        portfolio_usd = self._get_portfolio_usd()
+        max_notional = min(
+            self.profile.max_notional_pct * portfolio_usd,
+            _HARD_NOTIONAL_CEILING_USD,
+        )
+        max_daily_loss = min(
+            self.profile.max_daily_loss_pct * portfolio_usd,
+            _HARD_DAILY_LOSS_CEILING_USD,
+        )
+
         # Guard: daily loss
-        if snap.total_loss_today_usd() >= self.profile.max_daily_loss_usd:
+        if snap.total_loss_today_usd() >= max_daily_loss:
             return Decision(
                 False,
                 f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} "
-                f">= ${self.profile.max_daily_loss_usd:.2f}",
+                f">= ${max_daily_loss:.2f} ({self.profile.max_daily_loss_pct:.0%} of ${portfolio_usd:.0f})",
             )
 
         # Guard: time to close. Runs before the candidate scan so we don't
@@ -303,7 +330,7 @@ class Executor:
             if len(self._order_times) >= MAX_ORDERS_PER_MINUTE:
                 break
 
-            ticket = self._build_ticket(row, side, edge, working_snap)
+            ticket = self._build_ticket(row, side, edge, working_snap, max_notional)
             if ticket is None:
                 continue
             decision = self._place(ticket)
@@ -342,6 +369,7 @@ class Executor:
         side_label: str,
         edge: float,
         snap,
+        max_notional_usd: float,
     ) -> OrderTicket | None:
         # side_label is from actionable_edge. SELL_YES needs an existing long
         # (closing only). BUY_NO is the canonical fresh-short entry — Kalshi's
@@ -396,7 +424,7 @@ class Executor:
         # snap.open_notional_usd already aggregates across both YES and NO
         # holdings so the cap binds the bot's total dollar exposure.
         if action == "buy":
-            remaining_notional = self.profile.max_notional_usd - snap.open_notional_usd
+            remaining_notional = max_notional_usd - snap.open_notional_usd
             cost_per_contract = limit_cents / 100.0
             if cost_per_contract <= 0:
                 return None
