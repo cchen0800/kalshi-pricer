@@ -4,23 +4,23 @@
 # the caller decides when to flip from screen sessions to systemd.
 #
 # Usage (run on VPS as user `chris`):
-#   bash ~/kalshi-pricer/deploy/install_systemd.sh
+#   bash ~/kalshi-pricers/kalshi-pricer/deploy/install_systemd.sh
 #
 # After install, see deploy/README.md or DEPLOY.md for the migration steps.
 
 set -euo pipefail
 
-REPO="$HOME/kalshi-pricer"
-SRC="$REPO/deploy/systemd"
+REPO_ROOT="$HOME/kalshi-pricers"
+SRC="$REPO_ROOT/kalshi-pricer/deploy/systemd"
 DST="$HOME/.config/systemd/user"
 
 if [[ ! -d "$SRC" ]]; then
-  echo "error: $SRC not found — is the repo cloned at $REPO?" >&2
+  echo "error: $SRC not found — is the monorepo cloned at $REPO_ROOT?" >&2
   exit 1
 fi
 
 mkdir -p "$DST"
-mkdir -p "$HOME/kalshi-pricer/logs" "$HOME/eth-pricer/logs"
+mkdir -p "$REPO_ROOT/kalshi-pricer/logs" "$REPO_ROOT/eth-pricer/logs"
 
 cp -v "$SRC"/*.service "$SRC"/*.target "$DST/"
 
@@ -48,4 +48,4 @@ fi
 echo
 echo "Done. Units installed in $DST."
 echo "Migrate from screen with:"
-echo "    bash $REPO/deploy/migrate_from_screen.sh"
+echo "    bash $REPO_ROOT/kalshi-pricer/deploy/migrate_from_screen.sh"

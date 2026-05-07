@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/chris/kalshi-pricer
-ExecStart=/home/chris/kalshi-pricer/.venv/bin/python trade.py --live --profile selective --yes-i-know
+WorkingDirectory=/home/chris/kalshi-pricers/kalshi-pricer
+ExecStart=/home/chris/kalshi-pricers/kalshi-pricer/.venv/bin/python trade.py --live --profile selective --yes-i-know
 Restart=on-failure
 RestartSec=10
-StandardOutput=append:/home/chris/kalshi-pricer/logs/selective.log
-StandardError=append:/home/chris/kalshi-pricer/logs/selective.log
+StandardOutput=append:/home/chris/kalshi-pricers/kalshi-pricer/logs/selective.log
+StandardError=append:/home/chris/kalshi-pricers/kalshi-pricer/logs/selective.log
 TimeoutStopSec=30
 
 [Install]
