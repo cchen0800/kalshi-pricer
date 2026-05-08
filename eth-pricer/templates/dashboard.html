@@ -1359,10 +1359,14 @@ async function refreshTrades() {
     const edgeCls = t.edge_cents > 0 ? "pos" : t.edge_cents < 0 ? "neg" : "";
     const edgeStr = (t.edge_cents >= 0 ? "+" : "") + t.edge_cents.toFixed(1) + "¢";
     let outcomeCell, outcomeCls;
-    if (t.settled) {
+    if (t.settled && t.fill_price_cents != null) {
       const won = t.market_result === t.side;
       outcomeCell = won ? "WON" : "LOST";
       outcomeCls = won ? "outcome-won" : "outcome-lost";
+    } else if (t.settled) {
+      // Market settled but our order never filled — bot took no position.
+      outcomeCell = "no fill";
+      outcomeCls = "muted";
     } else if (t.status === "submitted") {
       outcomeCell = t.fill_price_cents != null ? "open" : "resting";
       outcomeCls = "outcome-open";

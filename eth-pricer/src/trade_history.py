@@ -89,33 +89,59 @@ def _order_pnl_usd(
     return revenue - total_cost - total_fees
 
 
-def _fetch_fills(trader, ticker: str | None = None, limit: int = 200) -> list[dict]:
-    """All fills, optionally filtered to one market. Best-effort, swallows errors."""
+def _fetch_fills(trader, ticker: str | None = None, page_size: int = 200) -> list[dict]:
+    """All fills, optionally filtered to one market. Best-effort, swallows errors.
+
+    Paginates through Kalshi's cursor until exhausted — without this, P&L silently
+    drifts low once the bot's lifetime fill count exceeds the page size.
+    """
     if trader is None:
         return []
-    key = f"fills:{ticker or '*'}:{limit}"
+    key = f"fills:{ticker or '*'}:all"
     def _go():
+        out: list[dict] = []
+        cursor: str | None = None
         try:
-            data = trader.get_fills(ticker=ticker, limit=limit)
-            return data.get("fills", []) or []
+            while True:
+                params: dict[str, Any] = {"limit": page_size}
+                if ticker:
+                    params["ticker"] = ticker
+                if cursor:
+                    params["cursor"] = cursor
+                data = trader._request("GET", "/portfolio/fills", params=params)
+                batch = data.get("fills", []) or []
+                out.extend(batch)
+                cursor = data.get("cursor")
+                if not cursor or not batch:
+                    break
         except Exception as e:
-            log.warning("get_fills(%s) failed: %s", ticker, e)
-            return []
+            log.warning("get_fills(%s) failed mid-page: %s", ticker, e)
+        return out
     return _cached(key, _go)
 
 
-def _fetch_settlements(trader, limit: int = 200) -> list[dict]:
+def _fetch_settlements(trader, page_size: int = 200) -> list[dict]:
+    """All settlements, paginated. Same drift hazard as fills if not paginated."""
     if trader is None:
         return []
     def _go():
+        out: list[dict] = []
+        cursor: str | None = None
         try:
-            # KalshiTrader doesn't expose this as a method on older builds, so call _request.
-            data = trader._request("GET", "/portfolio/settlements", params={"limit": limit})
-            return data.get("settlements", []) or []
+            while True:
+                params: dict[str, Any] = {"limit": page_size}
+                if cursor:
+                    params["cursor"] = cursor
+                data = trader._request("GET", "/portfolio/settlements", params=params)
+                batch = data.get("settlements", []) or []
+                out.extend(batch)
+                cursor = data.get("cursor")
+                if not cursor or not batch:
+                    break
         except Exception as e:
-            log.warning("get_settlements failed: %s", e)
-            return []
-    return _cached(f"settlements:{limit}", _go)
+            log.warning("get_settlements failed mid-page: %s", e)
+        return out
+    return _cached("settlements:all", _go)
 
 
 def _fetch_balance(trader) -> dict:
@@ -162,7 +188,7 @@ def list_trades(
             settlement_by_market[mt] = s
 
     # Pull fills once, broadly; index by order_id for direct join.
-    fills = _fetch_fills(trader, ticker=None, limit=200)
+    fills = _fetch_fills(trader, ticker=None)
     fills_by_order_id: dict[str, list[dict]] = {}
     for f in fills:
         oid = f.get("order_id")
