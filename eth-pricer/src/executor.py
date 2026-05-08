@@ -81,8 +81,8 @@ def _format_event(event_ticker: str) -> str:
 # Per-bot risk knobs live in BOT_PROFILES below. Anything that varies between
 # bots (notional cap, edge floor, kill-file, COID prefix) is profile-scoped.
 # Anything that should never differ between bots stays module-level here.
-MAX_CONTRACTS_PER_ORDER = 5
-MAX_CONTRACTS_PER_STRIKE = 10
+MAX_CONTRACTS_PER_ORDER = 100         # safety backstop; edge scaling + notional cap bind first
+MAX_CONTRACTS_PER_STRIKE = 50
 MAX_ORDERS_PER_MINUTE = 4
 MAX_ORDERS_PER_POLL = 3           # PR #6: place up to K candidates per poll cycle
                                   # (single-poll cap; rate limit and notional cap
@@ -101,6 +101,8 @@ ORDER_TTL_SECONDS = 3.0           # Native IOC: every BUY is priced AT the ask
                                   # adverse-selected (48h data: maker fills lost
                                   # money, taker fills made +83% ROI). After this
                                   # delay we cancel anything still resting.
+FULL_CONVICTION_EDGE_CENTS = 10.0 # log scaling saturates here; edges above this
+                                  # deploy 100% of available notional budget.
 
 # Hard ceilings. Profile values are validated against these at import time;
 # a typo can never unlock more risk than the ceiling allows.
@@ -420,16 +422,21 @@ class Executor:
         # Per-order size cap.
         max_count = min(MAX_CONTRACTS_PER_ORDER, room_in_strike)
 
-        # Notional cap (only matters for buys; sells free up notional).
-        # snap.open_notional_usd already aggregates across both YES and NO
-        # holdings so the cap binds the bot's total dollar exposure.
+        # Notional cap + log-proportional edge sizing (buys only).
         if action == "buy":
             remaining_notional = max_notional_usd - snap.open_notional_usd
             cost_per_contract = limit_cents / 100.0
             if cost_per_contract <= 0:
                 return None
             max_by_notional = math.floor(remaining_notional / cost_per_contract)
-            max_count = min(max_count, max_by_notional)
+            edge_ratio = min(
+                math.log(1 + edge) / math.log(1 + FULL_CONVICTION_EDGE_CENTS),
+                1.0,
+            )
+            edge_scaled = math.floor(edge_ratio * max_by_notional)
+            if max_by_notional >= 1:
+                edge_scaled = max(1, edge_scaled)
+            max_count = min(max_count, edge_scaled)
 
         if max_count < 1:
             return None

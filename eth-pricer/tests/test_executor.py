@@ -19,7 +19,9 @@ import pytest
 from src.db import PollRow, connect
 from src.executor import (
     BOT_PROFILES,
+    FULL_CONVICTION_EDGE_CENTS,
     MAX_CONTRACTS_PER_ORDER,
+    MAX_CONTRACTS_PER_STRIKE,
     MAX_ORDERS_PER_MINUTE,
     MIN_MINUTES_TO_CLOSE,
     BotProfile,
@@ -335,7 +337,7 @@ def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
 
 def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
     """Notional cap binds across YES + NO sides. With most of the budget used,
-    at no_ask=5c some contracts still fit, capped by per-order max."""
+    at no_ask=5c some contracts still fit, capped by remaining notional."""
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=MAX_NOTIONAL_USD - 1.0,
         realized_pnl_today_usd=0.0,
@@ -344,7 +346,8 @@ def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
     row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
     d = ex.handle_poll([row])
     assert d.placed is True
-    assert d.ticket.count == MAX_CONTRACTS_PER_ORDER
+    # $1.00 remaining / $0.05 per contract = 20 max by notional (edge is high → full conviction).
+    assert d.ticket.count == 20
 
     # Budget exhausted → only $0.01 left, no contract fits at 5c.
     stub_snapshot(monkeypatch, PositionSnapshot(
@@ -425,9 +428,9 @@ def test_top_k_places_multiple_distinct_strikes(db, monkeypatch):
 
 def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
     """First placement consumes most of the notional cap; second candidate
-    sized down or blocked by running notional, not the original snap."""
-    # Budget: MAX_NOTIONAL - (MAX_NOTIONAL - 10) = $10 left.
-    # Each ticket at 60c × 5 = $3. So 3 tickets fit ($9), 4th pushes past.
+    blocked by running notional, not the original snap."""
+    # $10 remaining. At full conviction the first ticket grabs floor(10/0.60)=16
+    # contracts ($9.60), leaving $0.40 — not enough for another at 60c.
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=MAX_NOTIONAL_USD - 10.0,
         realized_pnl_today_usd=0.0,
@@ -439,26 +442,21 @@ def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
         for i in range(5)
     ]
     ex.handle_poll(rows)
-    # Each ticket is 5 × $0.60 = $3. Budget: $10. So 3 tickets fit ($9).
-    # MAX_ORDERS_PER_POLL also caps at 3, which is coincident here.
     intents = list(db.execute(
         "SELECT market_ticker, count, limit_price_cents FROM intended_orders ORDER BY id"
     ))
-    assert len(intents) == 3
-    for _, count, _price in intents:
-        assert count == 5
+    assert len(intents) == 1
+    assert intents[0][1] == 16  # floor($10 / $0.60)
 
 
 def test_top_k_running_held_blocks_same_market_repeats(db, monkeypatch):
-    """Two candidates on the SAME market → second one's per-strike concentration
+    """Candidates on the SAME market → second one's per-strike concentration
     must reflect the first ticket's contracts (so we can't silently double up)."""
     market = "KXETHD-SAME-T1"
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
     ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
-    # Two rows for the same market — different timestamps but identical setup.
-    # First ticket lifts 5 contracts (per-order cap). Per-strike room is 10 →
-    # 5 left after first. Second ticket gets sized to 5. Third should be blocked
-    # because per-strike held would now be 10 (cap).
+    # First ticket fills all MAX_CONTRACTS_PER_STRIKE slots (notional is ample).
+    # Remaining candidates on the same market are blocked by concentration cap.
     row1 = make_row(market=market, model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
     row2 = make_row(market=market, model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
     row3 = make_row(market=market, model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
@@ -466,7 +464,37 @@ def test_top_k_running_held_blocks_same_market_repeats(db, monkeypatch):
     intents = list(db.execute(
         "SELECT count FROM intended_orders ORDER BY id"
     ))
-    # Two placements of 5 each → 10 contracts (the per-strike cap). Third blocked.
-    assert len(intents) == 2
-    assert intents[0][0] == 5
-    assert intents[1][0] == 5
+    assert len(intents) == 1
+    assert intents[0][0] == MAX_CONTRACTS_PER_STRIKE
+
+
+# ---- Edge-proportional sizing ----
+
+def test_edge_proportional_sizing_scales_with_conviction(db, monkeypatch):
+    """Higher net edge → more contracts (log scaling). With tight notional
+    budget so edge scaling is the binding constraint, not per-strike."""
+    import math
+
+    # $5 remaining at 25c/contract → 20 max by notional.
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=MAX_NOTIONAL_USD - 5.0,
+        realized_pnl_today_usd=0.0,
+    ))
+    ex_low = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    # Moderate edge (~8c net) — well above floor but below full conviction.
+    row_low = make_row(market="KXETHD-LO-T1", model_prob=0.35, yes_ask=0.25, yes_bid=0.20)
+    d_low = ex_low.handle_poll([row_low])
+
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=MAX_NOTIONAL_USD - 5.0,
+        realized_pnl_today_usd=0.0,
+    ))
+    ex_high = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    # Huge edge (~53c net) — full conviction.
+    row_high = make_row(market="KXETHD-HI-T1", model_prob=0.80, yes_ask=0.25, yes_bid=0.20)
+    d_high = ex_high.handle_poll([row_high])
+
+    assert d_low.placed and d_high.placed
+    assert d_high.ticket.count > d_low.ticket.count
+    # Full conviction should deploy all 20 contracts (floor(5.0 / 0.25)).
+    assert d_high.ticket.count == 20
