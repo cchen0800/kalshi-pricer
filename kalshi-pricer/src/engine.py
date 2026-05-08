@@ -401,6 +401,7 @@ def run_one_poll(
     on_poll: Callable[[list[PollRow]], None] | None = None,
     averagers: dict[str, RealizedAverager] | None = None,
     calibrator: IsotonicCalibrator | None = None,
+    ref_sigma: float | None = None,
 ) -> float | None:
     """Run one poll cycle. Returns seconds_to_settlement of the active event,
     or None if no open event was found. The outer loop uses this to switch
@@ -438,6 +439,23 @@ def run_one_poll(
         sigma = annualized_vol(closes(candles))
     else:
         raise ValueError(f"unknown vol_estimator: {cfg.vol_estimator!r}")
+
+    # σ sanity-clamp: bound the estimate to [0.5x, 2x] of a robust historical
+    # reference (24h median of polls.sigma, computed once at startup). Catches
+    # bootstrap pathologies during Coinbase incidents where prime_candles_from_spots
+    # mixes stale and fresh prices and produces a spurious ~50% inflated σ. When
+    # /candles is healthy this clamp is normally inactive — fresh bars produce σ
+    # that lands inside the band naturally.
+    if ref_sigma is not None and ref_sigma > 0 and sigma > 0:
+        lo, hi = ref_sigma * 0.5, ref_sigma * 2.0
+        if sigma > hi:
+            log.warning("σ clamp HIGH: raw=%.2f%% > 2×ref=%.2f%%; using ref=%.2f%%",
+                        sigma * 100, hi * 100, ref_sigma * 100)
+            sigma = ref_sigma
+        elif sigma < lo:
+            log.warning("σ clamp LOW: raw=%.2f%% < 0.5×ref=%.2f%%; using ref=%.2f%%",
+                        sigma * 100, lo * 100, ref_sigma * 100)
+            sigma = ref_sigma
 
     # Maintain a per-event spot buffer so we can compute the realized portion of
     # the BRTI averaging window. When we're inside the final 60s, this becomes
@@ -520,6 +538,43 @@ def run(
     with KalshiClient() as kc, CoinbaseFeed() as feed, open_db(cfg.db_path) as db:
         log.info("engine started — db=%s poll=%ds threshold=%.1f¢",
                  cfg.db_path, cfg.poll_interval_seconds, cfg.edge_threshold_cents)
+        # Prime the feed's candle cache from recent poll history so that, if
+        # Coinbase /candles is in an outage at startup, we can still compute a
+        # vol estimate from logged spot samples until /candles recovers.
+        try:
+            cutoff_ms = int((time.time() - 7200) * 1000)
+            cur = db.execute(
+                "SELECT DISTINCT ts_ms, spot FROM polls WHERE ts_ms >= ? ORDER BY ts_ms",
+                (cutoff_ms,),
+            )
+            samples = [(int(row[0]) // 1000, float(row[1])) for row in cur.fetchall()]
+            n_bars = feed.prime_candles_from_spots(samples)
+            if n_bars:
+                log.info("primed candle cache from %d spot samples → %d 1m bars",
+                         len(samples), n_bars)
+        except Exception:
+            log.exception("candle-cache priming failed; continuing without it")
+        # σ reference: median of polls.sigma over the last 24h, used by
+        # run_one_poll to clamp pathological YZ outputs (e.g. when bootstrapping
+        # from contaminated polls history during a Coinbase incident). Median is
+        # robust to a few hours of bad σ writes — even with the full outage
+        # window included, the 24h median stays anchored in the normal regime.
+        ref_sigma: float | None = None
+        try:
+            sigma_cutoff_ms = int((time.time() - 24 * 3600) * 1000)
+            cur = db.execute(
+                "SELECT sigma FROM polls WHERE sigma > 0 AND ts_ms >= ?",
+                (sigma_cutoff_ms,),
+            )
+            sigmas = sorted(float(r[0]) for r in cur.fetchall())
+            if len(sigmas) >= 100:
+                ref_sigma = sigmas[len(sigmas) // 2]
+                log.info("σ reference (24h median, n=%d): %.2f%%",
+                         len(sigmas), ref_sigma * 100)
+            else:
+                log.warning("σ reference unavailable: only %d historical samples", len(sigmas))
+        except Exception:
+            log.exception("σ reference fetch failed; running without clamp")
         while True:
             if stop_event is not None and stop_event.is_set():
                 log.info("stop event set, exiting")
@@ -530,7 +585,7 @@ def run(
                 seconds_to_settlement = run_one_poll(
                     kc=kc, feed=feed, cfg=cfg, db=db,
                     on_poll=on_poll, averagers=averagers,
-                    calibrator=calibrator,
+                    calibrator=calibrator, ref_sigma=ref_sigma,
                 )
             except KeyboardInterrupt:
                 log.info("interrupted, exiting")
