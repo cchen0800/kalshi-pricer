@@ -47,7 +47,7 @@
     padding: 28px 32px 22px;
     border-bottom: 1px solid var(--hairline);
     display: flex;
-    align-items: stretch;
+    align-items: flex-start;
     gap: 32px;
   }
   .hero-left { flex: 0 0 auto; min-width: 0; }
@@ -56,8 +56,9 @@
     min-width: 200px;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
     position: relative;
+    padding-top: 8px;
   }
   .live-tag {
     display: inline-flex;
@@ -129,16 +130,42 @@
   .stale .hero-price { color: var(--yellow); }
 
   /* P&L Chart */
+  .pnl-chart-body {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+  }
   .pnl-chart-wrap {
-    width: 100%;
-    height: 100%;
-    min-height: 90px;
+    flex: 1 1 auto;
+    height: 110px;
     position: relative;
   }
   .pnl-chart-wrap canvas {
     width: 100%;
     height: 100%;
     display: block;
+  }
+  .pnl-y-axis {
+    flex: 0 0 auto;
+    width: 44px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 2px 0;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-3);
+  }
+  .pnl-x-axis {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    margin-right: 52px;
+    font-size: 10px;
+    color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
   }
   .pnl-chart-header {
     display: flex;
@@ -865,9 +892,19 @@
       <span class="pnl-chart-value zero" id="pnl-chart-value">—</span>
       <span class="pnl-chart-label">Realized P&L</span>
     </div>
-    <div class="pnl-chart-wrap" id="pnl-chart-wrap">
-      <canvas id="pnl-chart"></canvas>
-      <div class="pnl-chart-empty" id="pnl-chart-empty">No settled trades yet</div>
+    <div class="pnl-chart-body">
+      <div class="pnl-chart-wrap" id="pnl-chart-wrap">
+        <canvas id="pnl-chart"></canvas>
+        <div class="pnl-chart-empty" id="pnl-chart-empty">No settled trades yet</div>
+      </div>
+      <div class="pnl-y-axis">
+        <span id="pnl-y-max">—</span>
+        <span id="pnl-y-min">—</span>
+      </div>
+    </div>
+    <div class="pnl-x-axis">
+      <span id="pnl-x-start"></span>
+      <span id="pnl-x-end"></span>
     </div>
   </div>
 </header>
@@ -1482,6 +1519,19 @@ const _pnlValueEl = document.getElementById("pnl-chart-value");
 const _pnlEmptyEl = document.getElementById("pnl-chart-empty");
 let _pnlPoints = [];
 
+function _fmtAxisUsd(n) {
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  const abs = Math.abs(n);
+  if (abs >= 1000) return sign + "$" + (abs / 1000).toFixed(1) + "k";
+  if (abs >= 100) return sign + "$" + abs.toFixed(0);
+  return sign + "$" + abs.toFixed(2);
+}
+
+function _fmtAxisDate(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function drawPnlChart() {
   const wrap = document.getElementById("pnl-chart-wrap");
   const dpr = window.devicePixelRatio || 1;
@@ -1491,6 +1541,11 @@ function drawPnlChart() {
   _pnlCanvas.height = h * dpr;
   _pnlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+  const yMaxEl = document.getElementById("pnl-y-max");
+  const yMinEl = document.getElementById("pnl-y-min");
+  const xStartEl = document.getElementById("pnl-x-start");
+  const xEndEl = document.getElementById("pnl-x-end");
+
   if (_pnlPoints.length < 2) {
     _pnlCanvas.style.display = "none";
     _pnlEmptyEl.style.display = "flex";
@@ -1498,6 +1553,8 @@ function drawPnlChart() {
     _pnlValueEl.textContent = fmtSignedUsd(last);
     _pnlValueEl.className = "pnl-chart-value " + (last > 0 ? "pos" : last < 0 ? "neg" : "zero");
     if (_pnlPoints.length === 1) _pnlEmptyEl.textContent = "1 settled trade";
+    yMaxEl.textContent = ""; yMinEl.textContent = "";
+    xStartEl.textContent = ""; xEndEl.textContent = "";
     return;
   }
   _pnlCanvas.style.display = "block";
@@ -1510,15 +1567,16 @@ function drawPnlChart() {
 
   const lineColor = finalPnl >= 0 ? "rgba(0, 214, 50, 1)" : "rgba(255, 90, 82, 1)";
 
-  const pad = { top: 12, bottom: 18, left: 4, right: 8 };
+  const pad = { top: 6, bottom: 6, left: 4, right: 6 };
   const cw = w - pad.left - pad.right;
   const ch = h - pad.top - pad.bottom;
 
   const vals = pts.map(p => p.pnl);
-  let minV = Math.min(0, ...vals);
-  let maxV = Math.max(0, ...vals);
+  const dataMin = Math.min(0, ...vals);
+  const dataMax = Math.max(0, ...vals);
+  let minV = dataMin;
+  let maxV = dataMax;
   if (minV === maxV) { minV -= 1; maxV += 1; }
-  // Add a little headroom so the line doesn't kiss the top edge
   const span = maxV - minV;
   minV -= span * 0.08;
   maxV += span * 0.08;
@@ -1530,7 +1588,7 @@ function drawPnlChart() {
   const ctx = _pnlCtx;
   ctx.clearRect(0, 0, w, h);
 
-  // Robinhood-style dashed baseline at zero
+  // Dashed zero baseline
   const zeroY = yOf(0);
   ctx.strokeStyle = "rgba(255,255,255,0.18)";
   ctx.lineWidth = 1;
@@ -1541,15 +1599,20 @@ function drawPnlChart() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // The line itself — clean, slightly thicker, no fill
+  // The line
   ctx.beginPath();
   ctx.moveTo(xOf(0), yOf(pts[0].pnl));
   for (let i = 1; i < pts.length; i++) ctx.lineTo(xOf(i), yOf(pts[i].pnl));
   ctx.strokeStyle = lineColor;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1.75;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.stroke();
+
+  yMaxEl.textContent = _fmtAxisUsd(dataMax);
+  yMinEl.textContent = _fmtAxisUsd(dataMin);
+  xStartEl.textContent = _fmtAxisDate(pts[0].ts_ms);
+  xEndEl.textContent = _fmtAxisDate(pts[pts.length - 1].ts_ms);
 }
 
 async function refreshPnlChart() {
