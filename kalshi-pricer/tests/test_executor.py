@@ -209,6 +209,37 @@ def test_sell_yes_allowed_with_long(db, monkeypatch):
     assert d.ticket.count <= 5
 
 
+def test_sell_no_requires_existing_no_inventory(db):
+    """SELL_NO surfaces from actionable_edge when no_bid > (1 - model_prob),
+    but the executor must refuse to sell what we don't hold."""
+    ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    # No NO held in default snapshot. Big SELL_NO edge:
+    # model 0.30 → NO worth 70¢; no_bid=0.85 → gross 15¢ overpay.
+    row = make_row(model_prob=0.30, yes_bid=0.05, yes_ask=0.40,
+                   no_bid=0.85, no_ask=0.95)
+    d = ex.handle_poll([row])
+    assert d.placed is False
+
+
+def test_sell_no_allowed_with_no_position(db, monkeypatch):
+    """When we DO hold NO contracts, SELL_NO closes them — and the count is
+    capped at the held quantity (can't sell more than we own)."""
+    market = "KXBTCD-SELLNOT"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=4.00,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market, "no"): 7},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    row = make_row(market=market, model_prob=0.30, yes_bid=0.05, yes_ask=0.40,
+                   no_bid=0.85, no_ask=0.95)
+    d = ex.handle_poll([row])
+    assert d.placed is True
+    assert d.ticket.action == "sell"
+    assert d.ticket.side == "no"
+    assert d.ticket.count <= 7
+
+
 def test_daily_loss_limit_blocks(db, monkeypatch):
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=0.0,

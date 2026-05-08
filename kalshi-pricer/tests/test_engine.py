@@ -129,6 +129,47 @@ def test_sell_not_gated_by_regime():
     assert edge == pytest.approx(40.0 - expected_fee)
 
 
+def test_sell_no_edge_subtracts_fee():
+    # Model says P(yes)=30%, so NO is worth 70¢ in expectation. If no_bid=80¢
+    # the book overpays us 10¢ gross; fee at 80¢ ≈ 2¢ → net ~8¢.
+    # All other paths must be negative so SELL_NO actually wins:
+    #   yes_ask=0.40 → BUY_YES = 30 - 40 - fee < 0
+    #   yes_bid=0.05 → SELL_YES = 5 - 30 - fee < 0
+    #   no_ask=0.95  → BUY_NO  = 70 - 95 - fee < 0
+    row = make_row(
+        model_prob=0.30,
+        yes_bid=0.05, yes_ask=0.40,
+        no_bid=0.80, no_ask=0.95,
+    )
+    side, edge = actionable_edge(row)
+    assert side == "SELL_NO"
+    expected_fee = kalshi_fee_cents(80, 1)
+    assert edge == pytest.approx(10.0 - expected_fee)
+
+
+def test_sell_no_not_gated_by_regime():
+    # Closing a long NO must work even in calm-market / near-close conditions
+    # that gate every BUY side. Mirror of test_sell_not_gated_by_regime.
+    row = make_row(
+        model_prob=0.30,
+        yes_bid=0.05, yes_ask=0.40,
+        no_bid=0.80, no_ask=0.95,
+        strike=80_000.0, spot=80_000.0, sigma=0.20, minutes_left=3.0,
+    )
+    side, edge = actionable_edge(row)
+    assert side == "SELL_NO"
+    expected_fee = kalshi_fee_cents(80, 1)
+    assert edge == pytest.approx(10.0 - expected_fee)
+
+
+def test_sell_no_with_no_no_bid_returns_none():
+    # No no_bid → SELL_NO has no exit price → falls through.
+    row = make_row(model_prob=0.30, yes_bid=0.05, yes_ask=0.40,
+                   no_bid=None, no_ask=0.95)
+    side, _ = actionable_edge(row)
+    assert side == "NONE"
+
+
 def test_buy_falls_through_to_sell_when_gated():
     # Buy is bigger gross but blocked by the σ gate; sell side is positive
     # and ungated, so we should return SELL_YES (not NONE).

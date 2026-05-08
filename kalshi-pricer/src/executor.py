@@ -402,6 +402,17 @@ class Executor:
             if held <= 0:
                 log.debug("skip SELL_YES on %s: no long position", row.market_ticker)
                 return None
+        elif side_label == "SELL_NO":
+            action = "sell"
+            ticket_side = "no"
+            if row.no_bid is None:
+                return None
+            limit_cents = int(round(row.no_bid * 100))
+            # Only sell what we already own.
+            held = snap.open_contracts_by_market.get((row.market_ticker, "no"), 0)
+            if held <= 0:
+                log.debug("skip SELL_NO on %s: no NO position", row.market_ticker)
+                return None
         else:
             return None
 

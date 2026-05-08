@@ -274,6 +274,23 @@ def _buy_no_net(row: PollRow) -> float | None:
     return (1.0 - row.model_prob) * 100.0 - row.no_ask * 100.0 - fee
 
 
+def _sell_no_net(row: PollRow) -> float | None:
+    """Post-fee edge of a SELL_NO at no_bid (closing a long NO).
+
+    Selling NO at no_bid means receiving no_bid in exchange for giving up a
+    contract worth (1 - model_prob) in expectation. EV per contract:
+        no_bid * 100  - (1 - model_prob) * 100  - fee(no_bid)
+    Symmetric to SELL_YES with (yes_bid, model_prob) → (no_bid, 1-model_prob).
+    Positive when the book is overpaying for our NO relative to model fair value.
+    Returns None when no_bid is missing.
+    """
+    if row.no_bid is None:
+        return None
+    bid_cents = int(round(row.no_bid * 100))
+    fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
+    return row.no_bid * 100.0 - (1.0 - row.model_prob) * 100.0 - fee
+
+
 def _gate_flags(row: PollRow) -> tuple[int, int, int, int]:
     """Per-gate pass booleans for shadow logging. Mirrors _passes_buy_gates."""
     sig = int(row.sigma is not None and row.sigma >= BUY_GATE_MIN_SIGMA)
@@ -310,25 +327,30 @@ LEGACY_POLICY = SidePolicy(allow_buy_yes=True, allow_buy_no=False, sell_yes_to_c
 def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[str, float]:
     """Return (side, cents) of best lift-the-market edge, NET of Kalshi taker fee.
 
-    side ∈ {'BUY_YES','BUY_NO','SELL_YES','NONE'}. Returned `cents` is what
-    we'd actually pocket per contract after the exchange fee — at price=50¢
-    the fee is ~2¢, near 0¢/100¢ it's ~0¢, so 50/50 contracts must clear a
-    higher gross edge.
+    side ∈ {'BUY_YES','BUY_NO','SELL_YES','SELL_NO','NONE'}. Returned `cents`
+    is what we'd actually pocket per contract after the exchange fee — at
+    price=50¢ the fee is ~2¢, near 0¢/100¢ it's ~0¢, so 50/50 contracts must
+    clear a higher gross edge.
 
     Both BUY sides are regime-gated (see _passes_buy_gates) — we only open
     new positions when σ is high enough, the strike is far enough from spot,
     and there's enough time left. The σ floor differs by side: BUY_YES uses
     BUY_YES_GATE_MIN_SIGMA (high — wins concentrate at high vol), BUY_NO
     uses the lower BUY_NO_GATE_MIN_SIGMA (NO-side alpha lives across all vol
-    bands per the bucketed backtest). SELL_YES is not gated; closing a long
-    is always allowed. The `policy` argument toggles whether each side is
-    eligible at all; default preserves legacy BUY_YES-only entry behavior.
+    bands per the bucketed backtest). SELL_YES and SELL_NO are not gated;
+    closing an existing long is always allowed when the model says the book
+    is overpaying. Inventory is enforced downstream in the executor —
+    actionable_edge surfaces the edge regardless of whether we hold the
+    position. The `policy` argument toggles whether each side is eligible
+    at all; default preserves legacy BUY_YES-only entry behavior.
     """
-    buy_yes_or_none, sell_or_none = _net_edges(row)
+    buy_yes_or_none, sell_yes_or_none = _net_edges(row)
     buy_no_or_none = _buy_no_net(row)
+    sell_no_or_none = _sell_no_net(row)
     buy_yes = buy_yes_or_none if buy_yes_or_none is not None else float("-inf")
     buy_no = buy_no_or_none if buy_no_or_none is not None else float("-inf")
-    sell = sell_or_none if sell_or_none is not None else float("-inf")
+    sell_yes = sell_yes_or_none if sell_yes_or_none is not None else float("-inf")
+    sell_no = sell_no_or_none if sell_no_or_none is not None else float("-inf")
 
     buy_yes_eligible = (
         policy.allow_buy_yes and buy_yes > 0
@@ -338,15 +360,18 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
         policy.allow_buy_no and buy_no > 0
         and _passes_buy_gates(row, "BUY_NO")
     )
-    sell_eligible = sell > 0  # policy.sell_yes_to_close_only is enforced by the executor
+    sell_yes_eligible = sell_yes > 0  # ungated; executor enforces inventory
+    sell_no_eligible = sell_no > 0    # ungated; executor enforces inventory
 
     candidates: list[tuple[str, float]] = []
     if buy_yes_eligible:
         candidates.append(("BUY_YES", buy_yes))
     if buy_no_eligible:
         candidates.append(("BUY_NO", buy_no))
-    if sell_eligible:
-        candidates.append(("SELL_YES", sell))
+    if sell_yes_eligible:
+        candidates.append(("SELL_YES", sell_yes))
+    if sell_no_eligible:
+        candidates.append(("SELL_NO", sell_no))
     if not candidates:
         return "NONE", 0.0
     candidates.sort(key=lambda t: -t[1])
