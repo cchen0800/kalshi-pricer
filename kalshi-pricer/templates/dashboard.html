@@ -46,6 +46,18 @@
   .hero {
     padding: 28px 32px 22px;
     border-bottom: 1px solid var(--hairline);
+    display: flex;
+    align-items: stretch;
+    gap: 32px;
+  }
+  .hero-left { flex: 0 0 auto; min-width: 0; }
+  .hero-right {
+    flex: 1 1 0;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
   }
   .live-tag {
     display: inline-flex;
@@ -115,6 +127,49 @@
   }
   .stale .live-tag { color: var(--yellow); }
   .stale .hero-price { color: var(--yellow); }
+
+  /* P&L Chart */
+  .pnl-chart-wrap {
+    width: 100%;
+    height: 100%;
+    min-height: 90px;
+    position: relative;
+  }
+  .pnl-chart-wrap canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .pnl-chart-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .pnl-chart-value {
+    font-size: 22px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .pnl-chart-value.pos { color: var(--green); }
+  .pnl-chart-value.neg { color: var(--red); }
+  .pnl-chart-value.zero { color: var(--fg-3); }
+  .pnl-chart-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .pnl-chart-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--fg-3);
+    font-size: 12px;
+  }
 
   /* Tabs */
   .tabs {
@@ -476,8 +531,9 @@
   @media (max-width: 720px) {
     body { font-size: 14px; }
 
-    /* Hero — compact */
-    .hero { padding: 14px 16px 12px; }
+    /* Hero — compact, stacked */
+    .hero { padding: 14px 16px 12px; flex-direction: column; gap: 16px; }
+    .hero-right { min-height: 80px; }
     .live-tag { margin-bottom: 6px; font-size: 10.5px; }
     .hero-price { font-size: 30px; line-height: 1.1; }
     .hero-sub { font-size: 13px; line-height: 1.35; }
@@ -780,26 +836,38 @@
 </nav>
 
 <header class="hero">
-  <span class="live-tag">Live</span>
-  <h1 class="hero-price"><span id="spot">—</span></h1>
-  <p class="hero-sub"><span id="event">—</span></p>
-  <div class="hero-metrics">
-    <div class="metric">
-      <span class="metric-label">σ (60m, ann.)</span>
-      <span class="metric-value" id="sigma">—</span>
-      <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
+  <div class="hero-left">
+    <span class="live-tag">Live</span>
+    <h1 class="hero-price"><span id="spot">—</span></h1>
+    <p class="hero-sub"><span id="event">—</span></p>
+    <div class="hero-metrics">
+      <div class="metric">
+        <span class="metric-label">σ (60m, ann.)</span>
+        <span class="metric-value" id="sigma">—</span>
+        <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Time to close</span>
+        <span class="metric-value" id="ttl">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Edge threshold</span>
+        <span class="metric-value" id="thresh">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Last poll</span>
+        <span class="metric-value" id="age">—</span>
+      </div>
     </div>
-    <div class="metric">
-      <span class="metric-label">Time to close</span>
-      <span class="metric-value" id="ttl">—</span>
+  </div>
+  <div class="hero-right">
+    <div class="pnl-chart-header">
+      <span class="pnl-chart-value zero" id="pnl-chart-value">—</span>
+      <span class="pnl-chart-label">Realized P&L</span>
     </div>
-    <div class="metric">
-      <span class="metric-label">Edge threshold</span>
-      <span class="metric-value" id="thresh">—</span>
-    </div>
-    <div class="metric">
-      <span class="metric-label">Last poll</span>
-      <span class="metric-value" id="age">—</span>
+    <div class="pnl-chart-wrap" id="pnl-chart-wrap">
+      <canvas id="pnl-chart"></canvas>
+      <div class="pnl-chart-empty" id="pnl-chart-empty">No settled trades yet</div>
     </div>
   </div>
 </header>
@@ -1107,6 +1175,7 @@ document.querySelectorAll('[data-bot]').forEach(btn => {
     btn.classList.add("active");
     selectedBot = btn.dataset.bot;
     refreshTrades();
+    if (typeof refreshPnlChart === "function") refreshPnlChart();
   });
 });
 
@@ -1406,17 +1475,104 @@ async function refreshTrades() {
   }
 }
 
+// ─── P&L chart ───────────────────────────────────────────────────────────
+const _pnlCanvas = document.getElementById("pnl-chart");
+const _pnlCtx = _pnlCanvas.getContext("2d");
+const _pnlValueEl = document.getElementById("pnl-chart-value");
+const _pnlEmptyEl = document.getElementById("pnl-chart-empty");
+let _pnlPoints = [];
+
+function drawPnlChart() {
+  const wrap = document.getElementById("pnl-chart-wrap");
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  _pnlCanvas.width = w * dpr;
+  _pnlCanvas.height = h * dpr;
+  _pnlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  if (_pnlPoints.length < 2) {
+    _pnlCanvas.style.display = "none";
+    _pnlEmptyEl.style.display = "flex";
+    const last = _pnlPoints.length === 1 ? _pnlPoints[0].pnl : 0;
+    _pnlValueEl.textContent = fmtSignedUsd(last);
+    _pnlValueEl.className = "pnl-chart-value " + (last > 0 ? "pos" : last < 0 ? "neg" : "zero");
+    if (_pnlPoints.length === 1) _pnlEmptyEl.textContent = "1 settled trade";
+    return;
+  }
+  _pnlCanvas.style.display = "block";
+  _pnlEmptyEl.style.display = "none";
+
+  const pts = _pnlPoints;
+  const finalPnl = pts[pts.length - 1].pnl;
+  _pnlValueEl.textContent = fmtSignedUsd(finalPnl);
+  _pnlValueEl.className = "pnl-chart-value " + (finalPnl > 0 ? "pos" : finalPnl < 0 ? "neg" : "zero");
+
+  const lineColor = finalPnl >= 0 ? "rgba(0, 214, 50, 1)" : "rgba(255, 90, 82, 1)";
+
+  const pad = { top: 12, bottom: 18, left: 4, right: 8 };
+  const cw = w - pad.left - pad.right;
+  const ch = h - pad.top - pad.bottom;
+
+  const vals = pts.map(p => p.pnl);
+  let minV = Math.min(0, ...vals);
+  let maxV = Math.max(0, ...vals);
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  // Add a little headroom so the line doesn't kiss the top edge
+  const span = maxV - minV;
+  minV -= span * 0.08;
+  maxV += span * 0.08;
+  const range = maxV - minV;
+
+  const xOf = i => pad.left + (i / (pts.length - 1)) * cw;
+  const yOf = v => pad.top + (1 - (v - minV) / range) * ch;
+
+  const ctx = _pnlCtx;
+  ctx.clearRect(0, 0, w, h);
+
+  // Robinhood-style dashed baseline at zero
+  const zeroY = yOf(0);
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(pad.left, zeroY);
+  ctx.lineTo(w - pad.right, zeroY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // The line itself — clean, slightly thicker, no fill
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(pts[0].pnl));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(xOf(i), yOf(pts[i].pnl));
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke();
+}
+
+async function refreshPnlChart() {
+  try {
+    const resp = await fetch(`/api/pnl_series?bot=${encodeURIComponent(selectedBot)}`, {cache: "no-store"});
+    const data = await resp.json();
+    _pnlPoints = data.points || [];
+  } catch (e) { /* silent — chart is non-critical */ }
+  drawPnlChart();
+}
+
+refreshPnlChart();
+window.addEventListener("resize", drawPnlChart);
+
 refresh();
 refreshSpot();
 setInterval(refresh, 2000);
 setInterval(refreshSpot, 1500);
 setInterval(tickClose, 1000);
-// Refresh trades data periodically when the tab is open. Cheap when hidden
-// because we only fetch on tab activation; this just keeps it fresh while
-// the user is looking at it.
 setInterval(() => {
   if (!document.getElementById("tab-trades").hidden) refreshTrades();
 }, 15000);
+setInterval(refreshPnlChart, 30000);
 
 // Boot: gentle fade-up of the chrome on first paint.
 if (_M && !_reducedMotion) {

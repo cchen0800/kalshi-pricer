@@ -33,7 +33,7 @@ from src.db import open_db
 from src.engine import EngineConfig, event_close_utc, run as run_engine
 from src.executor import BOT_PROFILES
 from src.notify import TelegramNotifier
-from src.trade_history import list_trades, summarize
+from src.trade_history import list_trades, pnl_series, summarize
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -293,6 +293,19 @@ def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
     if profile is not None:
         summary["max_notional_pct"] = profile.max_notional_pct
     return JSONResponse({"trades": trades, "summary": summary, "bot": bot})
+
+
+@app.get("/api/pnl_series")
+def api_pnl_series(bot: str = "selective") -> JSONResponse:
+    cfg: EngineConfig = _state["cfg"]
+    trader = _state.get("trader")
+    if bot == "aggressive":
+        db_path = _state.get("aggressive_db") or cfg.db_path
+    else:
+        db_path = cfg.db_path
+    with open_db(db_path) as db:
+        points = pnl_series(db, trader, mode="live")
+    return JSONResponse({"points": points, "bot": bot})
 
 
 @app.get("/api/visitors")

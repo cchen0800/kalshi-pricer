@@ -271,6 +271,36 @@ def list_trades(
     return out
 
 
+def pnl_series(
+    db: sqlite3.Connection,
+    trader: Any,
+    *,
+    mode: str = "live",
+) -> list[dict]:
+    """Cumulative P&L series sorted by settlement time, for charting.
+
+    Each point is a settled trade with a timestamp and running cumulative P&L.
+    Trades without P&L (unsettled, sells, no fills) are excluded.
+    """
+    trades = list_trades(db, trader, mode=mode, limit=500)
+    settled = [
+        t for t in trades
+        if t["settled"] and t["order_pnl_usd"] is not None
+    ]
+    settled.sort(key=lambda t: t["ts_ms"])
+
+    cumulative = 0.0
+    points = []
+    for t in settled:
+        cumulative += t["order_pnl_usd"]
+        points.append({
+            "ts_ms": t["ts_ms"],
+            "pnl": round(cumulative, 4),
+            "delta": round(t["order_pnl_usd"], 4),
+        })
+    return points
+
+
 def summarize(
     db: sqlite3.Connection,
     trader: Any,
