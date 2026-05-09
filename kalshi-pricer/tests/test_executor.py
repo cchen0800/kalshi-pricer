@@ -48,8 +48,9 @@ def _legacy_profile(*, kill_path: Path | None = None) -> BotProfile:
         # policy left at default (LEGACY_POLICY)
     )
 
-MAX_NOTIONAL_USD = BOT_PROFILES["selective"].max_notional_pct * TEST_PORTFOLIO_USD
-MAX_DAILY_LOSS_USD = BOT_PROFILES["selective"].max_daily_loss_pct * TEST_PORTFOLIO_USD
+from src.executor import _HARD_NOTIONAL_CEILING_USD, _HARD_DAILY_LOSS_CEILING_USD
+MAX_NOTIONAL_USD = min(BOT_PROFILES["selective"].max_notional_pct * TEST_PORTFOLIO_USD, _HARD_NOTIONAL_CEILING_USD)
+MAX_DAILY_LOSS_USD = min(BOT_PROFILES["selective"].max_daily_loss_pct * TEST_PORTFOLIO_USD, _HARD_DAILY_LOSS_CEILING_USD)
 from src.positions import PositionSnapshot
 
 
@@ -370,15 +371,15 @@ def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
     """Notional cap binds across YES + NO sides. With most of the budget used,
     at no_ask=5c some contracts still fit, capped by remaining notional."""
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=MAX_NOTIONAL_USD - 1.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 0.40,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_selective_profile())
     row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
     d = ex.handle_poll([row])
     assert d.placed is True
-    # $1.00 remaining / $0.05 per contract = 20 max by notional (edge is high → full conviction).
-    assert d.ticket.count == 20
+    # $0.40 remaining / $0.05 per contract = 8 max by notional (edge is high → full conviction).
+    assert d.ticket.count == 8
 
     # Budget exhausted → only $0.01 left, no contract fits at 5c.
     stub_snapshot(monkeypatch, PositionSnapshot(
@@ -460,10 +461,11 @@ def test_top_k_places_multiple_distinct_strikes(db, monkeypatch):
 def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
     """First placement consumes most of the notional cap; second candidate
     blocked by running notional, not the original snap."""
-    # $10 remaining. At full conviction the first ticket grabs floor(10/0.60)=16
-    # contracts ($9.60), leaving $0.40 — not enough for another at 60c.
+    # $6.50 remaining at 60c/contract. Per-strike cap (10) allows 10 contracts,
+    # but notional cap binds at floor(6.50/0.60)=10. First ticket takes $6.00,
+    # leaving $0.50 — not enough for another at 60c.
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=MAX_NOTIONAL_USD - 10.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 6.50,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
@@ -477,7 +479,7 @@ def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
         "SELECT market_ticker, count, limit_price_cents FROM intended_orders ORDER BY id"
     ))
     assert len(intents) == 1
-    assert intents[0][1] == 16  # floor($10 / $0.60)
+    assert intents[0][1] == 10  # per-strike cap binds at 10
 
 
 def test_top_k_running_held_blocks_same_market_repeats(db, monkeypatch):
@@ -506,9 +508,9 @@ def test_edge_proportional_sizing_scales_with_conviction(db, monkeypatch):
     budget so edge scaling is the binding constraint, not per-strike."""
     import math
 
-    # $5 remaining at 25c/contract → 20 max by notional.
+    # $2 remaining at 25c/contract → 8 max by notional (under per-strike cap).
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=MAX_NOTIONAL_USD - 5.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 2.0,
         realized_pnl_today_usd=0.0,
     ))
     ex_low = Executor(db, trader=None, live=False, profile=_legacy_profile())
@@ -517,7 +519,7 @@ def test_edge_proportional_sizing_scales_with_conviction(db, monkeypatch):
     d_low = ex_low.handle_poll([row_low])
 
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=MAX_NOTIONAL_USD - 5.0,
+        open_notional_usd=MAX_NOTIONAL_USD - 2.0,
         realized_pnl_today_usd=0.0,
     ))
     ex_high = Executor(db, trader=None, live=False, profile=_legacy_profile())
@@ -527,5 +529,5 @@ def test_edge_proportional_sizing_scales_with_conviction(db, monkeypatch):
 
     assert d_low.placed and d_high.placed
     assert d_high.ticket.count > d_low.ticket.count
-    # Full conviction should deploy all 20 contracts (floor(5.0 / 0.25)).
-    assert d_high.ticket.count == 20
+    # Full conviction should deploy all 8 contracts (floor(2.0 / 0.25)).
+    assert d_high.ticket.count == 8
