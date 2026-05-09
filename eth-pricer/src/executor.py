@@ -134,7 +134,15 @@ BOT_PROFILES: dict[str, BotProfile] = {
     "selective": BotProfile(
         bot_id="eth-selective",
         coid_prefix="ethp-",      # legacy prefix; do not change (existing live history)
-        max_notional_pct=0.15,
+        # 2026-05-09 rebalance (post-merge with PR #1 risk-tightening):
+        # max_notional_pct nudged 0.15 → 0.28 (midpoint between the conservative
+        # post-loss tightening at 0.15 and the analysis-driven target of 0.40).
+        # ETH BUY_NO is the only bot bucket where the shadow signal cleanly
+        # translates to realized P&L (+6c/contract predicted = +6c realized in
+        # the 147K-poll alpha scan), so it gets the larger relative bump:
+        # ETH share of bot capital rises from ~50% to ~64%. Daily-loss cap
+        # stays at the tightened 0.05. Reassess after 2 weeks of fresh fills.
+        max_notional_pct=0.28,
         max_daily_loss_pct=0.05,
         min_edge_cents=3.0,
         kill_file=Path(".kill"),  # legacy

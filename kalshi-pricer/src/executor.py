@@ -134,7 +134,14 @@ BOT_PROFILES: dict[str, BotProfile] = {
     "selective": BotProfile(
         bot_id="btc-selective",
         coid_prefix="btcp-",      # legacy prefix; do not change (existing live history)
-        max_notional_pct=0.10,
+        # 2026-05-09 rebalance (post-merge with PR #1 risk-tightening):
+        # max_notional_pct nudged 0.10 → 0.16 (midpoint between the conservative
+        # post-loss tightening at 0.10 and the analysis-driven target of 0.22).
+        # The bot's BUY_NO signal still works on the 50-75¢ ask sub-band per
+        # the shadow alpha scan; this gives it a slightly bigger budget while
+        # keeping daily-loss cap and min_edge_cents at the tightened post-loss
+        # values. Reassess after 2 weeks of attributed fills.
+        max_notional_pct=0.16,
         max_daily_loss_pct=0.05,
         min_edge_cents=5.0,
         kill_file=Path(".kill"),  # legacy
