@@ -275,6 +275,23 @@ def _buy_no_net(row: PollRow) -> float | None:
     return (1.0 - row.model_prob) * 100.0 - row.no_ask * 100.0 - fee
 
 
+def _sell_no_net(row: PollRow) -> float | None:
+    """Post-fee edge of a SELL_NO at no_bid (closing a long NO).
+
+    Selling NO at no_bid means receiving no_bid in exchange for giving up a
+    contract worth (1 - model_prob) in expectation. EV per contract:
+        no_bid * 100  - (1 - model_prob) * 100  - fee(no_bid)
+    Symmetric to SELL_YES with (yes_bid, model_prob) → (no_bid, 1-model_prob).
+    Positive when the book is overpaying for our NO relative to model fair value.
+    Returns None when no_bid is missing.
+    """
+    if row.no_bid is None:
+        return None
+    bid_cents = int(round(row.no_bid * 100))
+    fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
+    return row.no_bid * 100.0 - (1.0 - row.model_prob) * 100.0 - fee
+
+
 def _gate_flags(row: PollRow) -> tuple[int, int, int, int]:
     """Per-gate pass booleans for shadow logging. Mirrors _passes_buy_gates."""
     sig = int(row.sigma is not None and row.sigma >= BUY_GATE_MIN_SIGMA)
@@ -311,25 +328,30 @@ LEGACY_POLICY = SidePolicy(allow_buy_yes=True, allow_buy_no=False, sell_yes_to_c
 def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[str, float]:
     """Return (side, cents) of best lift-the-market edge, NET of Kalshi taker fee.
 
-    side ∈ {'BUY_YES','BUY_NO','SELL_YES','NONE'}. Returned `cents` is what
-    we'd actually pocket per contract after the exchange fee — at price=50¢
-    the fee is ~2¢, near 0¢/100¢ it's ~0¢, so 50/50 contracts must clear a
-    higher gross edge.
+    side ∈ {'BUY_YES','BUY_NO','SELL_YES','SELL_NO','NONE'}. Returned `cents`
+    is what we'd actually pocket per contract after the exchange fee — at
+    price=50¢ the fee is ~2¢, near 0¢/100¢ it's ~0¢, so 50/50 contracts must
+    clear a higher gross edge.
 
     Both BUY sides are regime-gated (see _passes_buy_gates) — we only open
     new positions when σ is high enough, the strike is far enough from spot,
     and there's enough time left. The σ floor differs by side: BUY_YES uses
     BUY_YES_GATE_MIN_SIGMA (high — wins concentrate at high vol), BUY_NO
     uses the lower BUY_NO_GATE_MIN_SIGMA (NO-side alpha lives across all vol
-    bands per the bucketed backtest). SELL_YES is not gated; closing a long
-    is always allowed. The `policy` argument toggles whether each side is
-    eligible at all; default preserves legacy BUY_YES-only entry behavior.
+    bands per the bucketed backtest). SELL_YES and SELL_NO are not gated;
+    closing an existing long is always allowed when the model says the book
+    is overpaying. Inventory is enforced downstream in the executor —
+    actionable_edge surfaces the edge regardless of whether we hold the
+    position. The `policy` argument toggles whether each side is eligible
+    at all; default preserves legacy BUY_YES-only entry behavior.
     """
-    buy_yes_or_none, sell_or_none = _net_edges(row)
+    buy_yes_or_none, sell_yes_or_none = _net_edges(row)
     buy_no_or_none = _buy_no_net(row)
+    sell_no_or_none = _sell_no_net(row)
     buy_yes = buy_yes_or_none if buy_yes_or_none is not None else float("-inf")
     buy_no = buy_no_or_none if buy_no_or_none is not None else float("-inf")
-    sell = sell_or_none if sell_or_none is not None else float("-inf")
+    sell_yes = sell_yes_or_none if sell_yes_or_none is not None else float("-inf")
+    sell_no = sell_no_or_none if sell_no_or_none is not None else float("-inf")
 
     buy_yes_eligible = (
         policy.allow_buy_yes and buy_yes > 0
@@ -339,15 +361,18 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
         policy.allow_buy_no and buy_no > 0
         and _passes_buy_gates(row, "BUY_NO")
     )
-    sell_eligible = sell > 0  # policy.sell_yes_to_close_only is enforced by the executor
+    sell_yes_eligible = sell_yes > 0  # ungated; executor enforces inventory
+    sell_no_eligible = sell_no > 0    # ungated; executor enforces inventory
 
     candidates: list[tuple[str, float]] = []
     if buy_yes_eligible:
         candidates.append(("BUY_YES", buy_yes))
     if buy_no_eligible:
         candidates.append(("BUY_NO", buy_no))
-    if sell_eligible:
-        candidates.append(("SELL_YES", sell))
+    if sell_yes_eligible:
+        candidates.append(("SELL_YES", sell_yes))
+    if sell_no_eligible:
+        candidates.append(("SELL_NO", sell_no))
     if not candidates:
         return "NONE", 0.0
     candidates.sort(key=lambda t: -t[1])
@@ -402,7 +427,6 @@ def run_one_poll(
     on_poll: Callable[[list[PollRow]], None] | None = None,
     averagers: dict[str, RealizedAverager] | None = None,
     calibrator: IsotonicCalibrator | None = None,
-    ref_sigma: float | None = None,
 ) -> float | None:
     """Run one poll cycle. Returns seconds_to_settlement of the active event,
     or None if no open event was found. The outer loop uses this to switch
@@ -440,23 +464,6 @@ def run_one_poll(
         sigma = annualized_vol(closes(candles))
     else:
         raise ValueError(f"unknown vol_estimator: {cfg.vol_estimator!r}")
-
-    # σ sanity-clamp: bound the estimate to [0.5x, 2x] of a robust historical
-    # reference (24h median of polls.sigma, computed once at startup). Catches
-    # bootstrap pathologies during Coinbase incidents where prime_candles_from_spots
-    # mixes stale and fresh prices and produces a spurious ~50% inflated σ. When
-    # /candles is healthy this clamp is normally inactive — fresh bars produce σ
-    # that lands inside the band naturally.
-    if ref_sigma is not None and ref_sigma > 0 and sigma > 0:
-        lo, hi = ref_sigma * 0.5, ref_sigma * 2.0
-        if sigma > hi:
-            log.warning("σ clamp HIGH: raw=%.2f%% > 2×ref=%.2f%%; using ref=%.2f%%",
-                        sigma * 100, hi * 100, ref_sigma * 100)
-            sigma = ref_sigma
-        elif sigma < lo:
-            log.warning("σ clamp LOW: raw=%.2f%% < 0.5×ref=%.2f%%; using ref=%.2f%%",
-                        sigma * 100, lo * 100, ref_sigma * 100)
-            sigma = ref_sigma
 
     # Maintain a per-event spot buffer so we can compute the realized portion of
     # the ERTI averaging window. When we're inside the final 60s, this becomes
@@ -539,43 +546,6 @@ def run(
     with KalshiClient() as kc, CoinbaseFeed() as feed, open_db(cfg.db_path) as db:
         log.info("engine started — db=%s poll=%ds threshold=%.1f¢",
                  cfg.db_path, cfg.poll_interval_seconds, cfg.edge_threshold_cents)
-        # Prime the feed's candle cache from recent poll history so that, if
-        # Coinbase /candles is in an outage at startup, we can still compute a
-        # vol estimate from logged spot samples until /candles recovers.
-        try:
-            cutoff_ms = int((time.time() - 7200) * 1000)
-            cur = db.execute(
-                "SELECT DISTINCT ts_ms, spot FROM polls WHERE ts_ms >= ? ORDER BY ts_ms",
-                (cutoff_ms,),
-            )
-            samples = [(int(row[0]) // 1000, float(row[1])) for row in cur.fetchall()]
-            n_bars = feed.prime_candles_from_spots(samples)
-            if n_bars:
-                log.info("primed candle cache from %d spot samples → %d 1m bars",
-                         len(samples), n_bars)
-        except Exception:
-            log.exception("candle-cache priming failed; continuing without it")
-        # σ reference: median of polls.sigma over the last 24h, used by
-        # run_one_poll to clamp pathological YZ outputs (e.g. when bootstrapping
-        # from contaminated polls history during a Coinbase incident). Median is
-        # robust to a few hours of bad σ writes — even with the full outage
-        # window included, the 24h median stays anchored in the normal regime.
-        ref_sigma: float | None = None
-        try:
-            sigma_cutoff_ms = int((time.time() - 24 * 3600) * 1000)
-            cur = db.execute(
-                "SELECT sigma FROM polls WHERE sigma > 0 AND ts_ms >= ?",
-                (sigma_cutoff_ms,),
-            )
-            sigmas = sorted(float(r[0]) for r in cur.fetchall())
-            if len(sigmas) >= 100:
-                ref_sigma = sigmas[len(sigmas) // 2]
-                log.info("σ reference (24h median, n=%d): %.2f%%",
-                         len(sigmas), ref_sigma * 100)
-            else:
-                log.warning("σ reference unavailable: only %d historical samples", len(sigmas))
-        except Exception:
-            log.exception("σ reference fetch failed; running without clamp")
         while True:
             if stop_event is not None and stop_event.is_set():
                 log.info("stop event set, exiting")
@@ -586,7 +556,7 @@ def run(
                 seconds_to_settlement = run_one_poll(
                     kc=kc, feed=feed, cfg=cfg, db=db,
                     on_poll=on_poll, averagers=averagers,
-                    calibrator=calibrator, ref_sigma=ref_sigma,
+                    calibrator=calibrator,
                 )
             except KeyboardInterrupt:
                 log.info("interrupted, exiting")

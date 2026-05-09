@@ -89,59 +89,33 @@ def _order_pnl_usd(
     return revenue - total_cost - total_fees
 
 
-def _fetch_fills(trader, ticker: str | None = None, page_size: int = 200) -> list[dict]:
-    """All fills, optionally filtered to one market. Best-effort, swallows errors.
-
-    Paginates through Kalshi's cursor until exhausted — without this, P&L silently
-    drifts low once the bot's lifetime fill count exceeds the page size.
-    """
+def _fetch_fills(trader, ticker: str | None = None, limit: int = 200) -> list[dict]:
+    """All fills, optionally filtered to one market. Best-effort, swallows errors."""
     if trader is None:
         return []
-    key = f"fills:{ticker or '*'}:all"
+    key = f"fills:{ticker or '*'}:{limit}"
     def _go():
-        out: list[dict] = []
-        cursor: str | None = None
         try:
-            while True:
-                params: dict[str, Any] = {"limit": page_size}
-                if ticker:
-                    params["ticker"] = ticker
-                if cursor:
-                    params["cursor"] = cursor
-                data = trader._request("GET", "/portfolio/fills", params=params)
-                batch = data.get("fills", []) or []
-                out.extend(batch)
-                cursor = data.get("cursor")
-                if not cursor or not batch:
-                    break
+            data = trader.get_fills(ticker=ticker, limit=limit)
+            return data.get("fills", []) or []
         except Exception as e:
-            log.warning("get_fills(%s) failed mid-page: %s", ticker, e)
-        return out
+            log.warning("get_fills(%s) failed: %s", ticker, e)
+            return []
     return _cached(key, _go)
 
 
-def _fetch_settlements(trader, page_size: int = 200) -> list[dict]:
-    """All settlements, paginated. Same drift hazard as fills if not paginated."""
+def _fetch_settlements(trader, limit: int = 200) -> list[dict]:
     if trader is None:
         return []
     def _go():
-        out: list[dict] = []
-        cursor: str | None = None
         try:
-            while True:
-                params: dict[str, Any] = {"limit": page_size}
-                if cursor:
-                    params["cursor"] = cursor
-                data = trader._request("GET", "/portfolio/settlements", params=params)
-                batch = data.get("settlements", []) or []
-                out.extend(batch)
-                cursor = data.get("cursor")
-                if not cursor or not batch:
-                    break
+            # KalshiTrader doesn't expose this as a method on older builds, so call _request.
+            data = trader._request("GET", "/portfolio/settlements", params={"limit": limit})
+            return data.get("settlements", []) or []
         except Exception as e:
-            log.warning("get_settlements failed mid-page: %s", e)
-        return out
-    return _cached("settlements:all", _go)
+            log.warning("get_settlements failed: %s", e)
+            return []
+    return _cached(f"settlements:{limit}", _go)
 
 
 def _fetch_balance(trader) -> dict:
@@ -188,7 +162,7 @@ def list_trades(
             settlement_by_market[mt] = s
 
     # Pull fills once, broadly; index by order_id for direct join.
-    fills = _fetch_fills(trader, ticker=None)
+    fills = _fetch_fills(trader, ticker=None, limit=200)
     fills_by_order_id: dict[str, list[dict]] = {}
     for f in fills:
         oid = f.get("order_id")
@@ -269,6 +243,36 @@ def list_trades(
             "order_pnl_usd": order_pnl_usd,    # bot-only, per-order from this order's fills
         })
     return out
+
+
+def pnl_series(
+    db: sqlite3.Connection,
+    trader: Any,
+    *,
+    mode: str = "live",
+) -> list[dict]:
+    """Cumulative P&L series sorted by settlement time, for charting.
+
+    Each point is a settled trade with a timestamp and running cumulative P&L.
+    Trades without P&L (unsettled, sells, no fills) are excluded.
+    """
+    trades = list_trades(db, trader, mode=mode, limit=500)
+    settled = [
+        t for t in trades
+        if t["settled"] and t["order_pnl_usd"] is not None
+    ]
+    settled.sort(key=lambda t: t["ts_ms"])
+
+    cumulative = 0.0
+    points = []
+    for t in settled:
+        cumulative += t["order_pnl_usd"]
+        points.append({
+            "ts_ms": t["ts_ms"],
+            "pnl": round(cumulative, 4),
+            "delta": round(t["order_pnl_usd"], 4),
+        })
+    return points
 
 
 def summarize(
