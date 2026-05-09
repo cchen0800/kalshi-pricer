@@ -81,8 +81,12 @@ def _format_event(event_ticker: str) -> str:
 # Per-bot risk knobs live in BOT_PROFILES below. Anything that varies between
 # bots (notional cap, edge floor, kill-file, COID prefix) is profile-scoped.
 # Anything that should never differ between bots stays module-level here.
-MAX_CONTRACTS_PER_ORDER = 100         # safety backstop; edge scaling + notional cap bind first
-MAX_CONTRACTS_PER_STRIKE = 50
+MAX_CONTRACTS_PER_ORDER = 20          # safety backstop; edge scaling + notional cap bind first
+MAX_CONTRACTS_PER_STRIKE = 10
+MAX_CONTRACTS_PER_EVENT = 20          # same-side cap across the strike ladder of one event.
+                                      # Strikes within an event are 100% correlated to the same
+                                      # final spot — a directional thesis stacked across N strikes
+                                      # is one bet, not N.
 MAX_ORDERS_PER_MINUTE = 4
 MAX_ORDERS_PER_POLL = 3           # PR #6: place up to K candidates per poll cycle
                                   # (single-poll cap; rate limit and notional cap
@@ -108,8 +112,8 @@ FULL_CONVICTION_EDGE_CENTS = 10.0 # log scaling saturates here; edges above this
 # a typo can never unlock more risk than the ceiling allows.
 _MAX_NOTIONAL_CEILING_PCT = 1.0       # no profile can exceed 100% of portfolio
 _MAX_DAILY_LOSS_CEILING_PCT = 0.50    # no profile can lose >50% of portfolio/day
-_HARD_NOTIONAL_CEILING_USD = 500.0    # backstop: balance-fetch bug can't unlock infinite
-_HARD_DAILY_LOSS_CEILING_USD = 200.0
+_HARD_NOTIONAL_CEILING_USD = 100.0    # backstop: balance-fetch bug can't unlock infinite
+_HARD_DAILY_LOSS_CEILING_USD = 50.0
 _MIN_EDGE_FLOOR_CENTS = 2.0           # below this, fee + spread will eat the edge
 _BALANCE_CACHE_TTL_S = 30.0           # don't spam Kalshi in fast-poll (3s)
 _DRY_RUN_PORTFOLIO_USD = 1000.0       # synthetic balance for dry-run / tests
@@ -130,9 +134,9 @@ BOT_PROFILES: dict[str, BotProfile] = {
     "selective": BotProfile(
         bot_id="btc-selective",
         coid_prefix="btcp-",      # legacy prefix; do not change (existing live history)
-        max_notional_pct=0.33,
-        max_daily_loss_pct=0.10,
-        min_edge_cents=3.0,
+        max_notional_pct=0.10,
+        max_daily_loss_pct=0.05,
+        min_edge_cents=5.0,
         kill_file=Path(".kill"),  # legacy
         policy=SidePolicy(
             allow_buy_yes=False,
@@ -432,8 +436,19 @@ class Executor:
         if room_in_strike <= 0:
             return None
 
+        # Per-event concentration cap.
+        held_in_event_same_side = sum(
+            n for (mt, sd), n in snap.open_contracts_by_market.items()
+            if sd == ticket_side and mt.startswith(row.event_ticker + "-")
+        )
+        room_in_event = MAX_CONTRACTS_PER_EVENT - held_in_event_same_side
+        if action == "sell":
+            room_in_event = held_same_side
+        if room_in_event <= 0:
+            return None
+
         # Per-order size cap.
-        max_count = min(MAX_CONTRACTS_PER_ORDER, room_in_strike)
+        max_count = min(MAX_CONTRACTS_PER_ORDER, room_in_strike, room_in_event)
 
         # Notional cap + log-proportional edge sizing (buys only).
         if action == "buy":
