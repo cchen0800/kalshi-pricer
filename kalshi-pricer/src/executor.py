@@ -87,6 +87,8 @@ MAX_CONTRACTS_PER_EVENT = 20          # same-side cap across the strike ladder o
                                       # Strikes within an event are 100% correlated to the same
                                       # final spot — a directional thesis stacked across N strikes
                                       # is one bet, not N.
+MAX_OPEN_STRIKES_PER_EVENT_SIDE = 2   # count distinct same-side markets per event; contracts
+                                      # within a strike remain governed by MAX_CONTRACTS_PER_STRIKE.
 MAX_ORDERS_PER_MINUTE = 4
 MAX_ORDERS_PER_POLL = 3           # PR #6: place up to K candidates per poll cycle
                                   # (single-poll cap; rate limit and notional cap
@@ -149,6 +151,9 @@ BOT_PROFILES: dict[str, BotProfile] = {
             allow_buy_yes=False,
             allow_buy_no=True,
             sell_yes_to_close_only=True,
+            buy_no_min_sigma=0.30,
+            buy_no_min_ask=0.50,
+            buy_no_max_ask=0.75,
         ),
     ),
     # btc-aggressive disabled (negative P&L over live window). Profile kept
@@ -195,6 +200,7 @@ class OrderTicket:
     limit_price_cents: int     # 1..99
     count: int
     model_prob: float
+    model_prob_calibrated: float | None
     edge_cents: float
     minutes_left: float
     spot: float
@@ -207,6 +213,10 @@ class OrderTicket:
     @property
     def client_order_id(self) -> str:
         return f"{self.coid_prefix}{uuid.uuid4().hex[:24]}"
+
+    @property
+    def display_model_prob(self) -> float:
+        return self.model_prob_calibrated if self.model_prob_calibrated is not None else self.model_prob
 
 
 @dataclass
@@ -314,15 +324,15 @@ class Executor:
         # eligible — engine display + shadow logging still see the raw legacy
         # view via actionable_edge()'s default arg, so dashboards aren't
         # distorted by per-bot config.
-        candidates: list[tuple[float, PollRow, str, float]] = []
+        candidates: list[tuple[PollRow, str, float]] = []
         for r in rows:
             side, edge = actionable_edge(r, self.profile.policy)
             if side == "NONE" or edge < self.profile.min_edge_cents:
                 continue
-            candidates.append((edge, r, side, edge))
+            candidates.append((r, side, edge))
         if not candidates:
             return Decision(False, f"no rows above min_edge_cents={self.profile.min_edge_cents}")
-        candidates.sort(key=lambda x: -x[0])
+        candidates.sort(key=lambda x: self._candidate_sort_key(*x))
 
         # Top-K loop: place up to MAX_ORDERS_PER_POLL tickets, mutating a working
         # snap copy so each subsequent _build_ticket sees the running notional /
@@ -333,7 +343,7 @@ class Executor:
         working_snap = copy.deepcopy(snap)
         placed_tickets: list[OrderTicket] = []
         last_decision: Decision | None = None
-        for _, row, side, edge in candidates:
+        for row, side, edge in candidates:
             if len(placed_tickets) >= MAX_ORDERS_PER_POLL:
                 break
             # Re-check rate limit between placements — _place appends to
@@ -454,6 +464,17 @@ class Executor:
         if room_in_event <= 0:
             return None
 
+        if action == "buy":
+            open_markets_in_event = {
+                mt for (mt, sd), n in snap.open_contracts_by_market.items()
+                if n > 0 and sd == ticket_side and mt.startswith(row.event_ticker + "-")
+            }
+            if (
+                row.market_ticker not in open_markets_in_event
+                and len(open_markets_in_event) >= MAX_OPEN_STRIKES_PER_EVENT_SIDE
+            ):
+                return None
+
         # Per-order size cap.
         max_count = min(MAX_CONTRACTS_PER_ORDER, room_in_strike, room_in_event)
 
@@ -485,11 +506,32 @@ class Executor:
             limit_price_cents=limit_cents,
             count=int(max_count),
             model_prob=row.model_prob,
+            model_prob_calibrated=row.model_prob_calibrated,
             edge_cents=edge,
             minutes_left=row.minutes_left,
             spot=row.spot,
             coid_prefix=self.profile.coid_prefix,
         )
+
+    def _candidate_sort_key(self, row: PollRow, side_label: str, edge: float) -> tuple[int, float]:
+        if side_label.startswith("SELL"):
+            return (0, -edge)
+        limit_cents = self._limit_price_cents(row, side_label)
+        if limit_cents is None or limit_cents <= 0:
+            return (1, float("inf"))
+        return (1, -(edge / limit_cents))
+
+    @staticmethod
+    def _limit_price_cents(row: PollRow, side_label: str) -> int | None:
+        if side_label == "BUY_YES" and row.yes_ask is not None:
+            return int(round(row.yes_ask * 100))
+        if side_label == "BUY_NO" and row.no_ask is not None:
+            return int(round(row.no_ask * 100))
+        if side_label == "SELL_YES" and row.yes_bid is not None:
+            return int(round(row.yes_bid * 100))
+        if side_label == "SELL_NO" and row.no_bid is not None:
+            return int(round(row.no_bid * 100))
+        return None
 
     def _place(self, ticket: OrderTicket) -> Decision:
         coid = ticket.client_order_id
@@ -501,7 +543,7 @@ class Executor:
             log.info(
                 "[DRY-RUN] would place: %s %s %d @ %d¢ on %s  (edge=%.1f¢, model=%.1f¢, T-%.1fmin)",
                 ticket.action.upper(), ticket.side, ticket.count, ticket.limit_price_cents,
-                ticket.market_ticker, ticket.edge_cents, ticket.model_prob * 100, ticket.minutes_left,
+                ticket.market_ticker, ticket.edge_cents, ticket.display_model_prob * 100, ticket.minutes_left,
             )
             self._notify(ticket, mode="DRY-RUN", status="logged")
             self._order_times.append(time.time())
@@ -600,7 +642,7 @@ class Executor:
             f"{ticket.count} × {ticket.limit_price_cents}¢  (${ticket.notional_usd:.2f})\n"
             f"{strike_md} · {event_md}\n"
             f"spot ${ticket.spot:,.0f} · T-{ticket.minutes_left:.0f}min · "
-            f"model {ticket.model_prob*100:.1f}¢ · edge +{ticket.edge_cents:.1f}¢\n"
+            f"model {ticket.display_model_prob*100:.1f}¢ · edge +{ticket.edge_cents:.1f}¢\n"
             f"_{status_md}_"
         )
         self.notifier.send(msg)
@@ -623,15 +665,16 @@ class Executor:
             """
             INSERT INTO intended_orders (
                 ts_ms, mode, event_ticker, market_ticker, side, action,
-                limit_price_cents, count, notional_usd, model_prob, edge_cents,
+                limit_price_cents, count, notional_usd, model_prob, model_prob_calibrated, edge_cents,
                 minutes_left, spot, client_order_id, status, reject_reason,
                 kalshi_order_id, raw_response, bot_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts_ms, mode, ticket.event_ticker, ticket.market_ticker, ticket.side,
                 ticket.action, ticket.limit_price_cents, ticket.count, ticket.notional_usd,
-                ticket.model_prob, ticket.edge_cents, ticket.minutes_left, ticket.spot,
+                ticket.model_prob, ticket.model_prob_calibrated, ticket.edge_cents,
+                ticket.minutes_left, ticket.spot,
                 coid, status, reject, order_id,
                 json.dumps(response) if response is not None else None,
                 self.profile.bot_id,

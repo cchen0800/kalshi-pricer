@@ -176,7 +176,7 @@ def main() -> int:
                     syncer.maybe_sync(db)
                 scraper.maybe_scrape(db)
 
-            run(cfg, on_poll=on_poll)
+            run(cfg, on_poll=on_poll, shadow_policy=profile.policy)
     finally:
         kill_listener.stop()
         if trader is not None:

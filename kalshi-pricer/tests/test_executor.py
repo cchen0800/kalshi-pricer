@@ -21,6 +21,7 @@ from src.executor import (
     BOT_PROFILES,
     FULL_CONVICTION_EDGE_CENTS,
     MAX_CONTRACTS_PER_ORDER,
+    MAX_OPEN_STRIKES_PER_EVENT_SIDE,
     MAX_CONTRACTS_PER_STRIKE,
     MAX_ORDERS_PER_MINUTE,
     MIN_MINUTES_TO_CLOSE,
@@ -70,6 +71,7 @@ def make_row(
     yes_ask: float | None = 0.25,
     no_bid: float | None = None,
     no_ask: float | None = None,
+    model_prob_calibrated: float | None = None,
     minutes_left: float = 30.0,
     spot: float = 80_000.0,
     strike: float = 79_500.0,  # ~0.6% from spot — passes engine.actionable_edge gates
@@ -92,6 +94,7 @@ def make_row(
         no_ask=no_ask,
         volume=1000,
         edge_cents=edge,
+        model_prob_calibrated=model_prob_calibrated,
     )
 
 
@@ -322,21 +325,24 @@ def _selective_profile() -> BotProfile:
 
 def test_buy_no_dry_run_records_intent_with_side_no(db):
     ex = Executor(db, trader=None, live=False, profile=_selective_profile())
-    # Model says YES at 10c → NO worth ~90c. no_ask=5c → BUY_NO net ≈ 85c.
-    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+    # Model says YES at 10c → NO worth ~90c. no_ask=50c → BUY_NO net ≈ 38c.
+    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
     d = ex.handle_poll([row])
     assert d.placed is True
     assert d.ticket.side == "no"
     assert d.ticket.action == "buy"
-    assert d.ticket.limit_price_cents == 5
+    assert d.ticket.limit_price_cents == 50
 
     # Intent row in DB has side='no'
-    rows = list(db.execute("SELECT side, action, limit_price_cents FROM intended_orders"))
+    rows = list(db.execute(
+        "SELECT side, action, limit_price_cents, model_prob_calibrated FROM intended_orders"
+    ))
     assert len(rows) == 1
-    side_db, action_db, price_db = rows[0]
+    side_db, action_db, price_db, cal_db = rows[0]
     assert side_db == "no"
     assert action_db == "buy"
-    assert price_db == 5
+    assert price_db == 50
+    assert cal_db is None
 
 
 def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
@@ -352,7 +358,7 @@ def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
         open_contracts_by_market={(market, "no"): MAX_CONTRACTS_PER_STRIKE},
     ))
     ex = Executor(db, trader=None, live=False, profile=_selective_profile())
-    row = make_row(market=market, model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+    row = make_row(market=market, model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
     d = ex.handle_poll([row])
     assert d.placed is False  # NO side full
 
@@ -369,25 +375,25 @@ def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
 
 def test_buy_no_notional_cap_uses_aggregate_open_notional(db, monkeypatch):
     """Notional cap binds across YES + NO sides. With most of the budget used,
-    at no_ask=5c some contracts still fit, capped by remaining notional."""
+    at no_ask=50c some contracts still fit, capped by remaining notional."""
     stub_snapshot(monkeypatch, PositionSnapshot(
-        open_notional_usd=MAX_NOTIONAL_USD - 0.40,
+        open_notional_usd=MAX_NOTIONAL_USD - 4.00,
         realized_pnl_today_usd=0.0,
     ))
     ex = Executor(db, trader=None, live=False, profile=_selective_profile())
-    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
     d = ex.handle_poll([row])
     assert d.placed is True
-    # $0.40 remaining / $0.05 per contract = 8 max by notional (edge is high → full conviction).
+    # $4.00 remaining / $0.50 per contract = 8 max by notional.
     assert d.ticket.count == 8
 
-    # Budget exhausted → only $0.01 left, no contract fits at 5c.
+    # Budget exhausted → only $0.01 left, no contract fits at 50c.
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=MAX_NOTIONAL_USD - 0.01,
         realized_pnl_today_usd=0.0,
     ))
     row2 = make_row(market="KXBTCD-OTHER-T1", model_prob=0.10, yes_bid=0.20,
-                    yes_ask=0.25, no_ask=0.05)
+                    yes_ask=0.25, no_ask=0.50)
     d2 = ex.handle_poll([row2])
     assert d2.placed is False
 
@@ -404,12 +410,12 @@ def test_buy_no_live_posts_side_no(db, monkeypatch):
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
     ex = Executor(db, trader=FakeTrader(), live=True, profile=_selective_profile(),
                   portfolio_usd=TEST_PORTFOLIO_USD)
-    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
     d = ex.handle_poll([row])
     assert d.placed is True
     assert captured["side"] == "no"
     assert captured["action"] == "buy"
-    assert captured["limit_price_cents"] == 5
+    assert captured["limit_price_cents"] == 50
 
 
 def test_buy_no_telegram_label(db, monkeypatch):
@@ -428,34 +434,105 @@ def test_buy_no_telegram_label(db, monkeypatch):
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
     ex = Executor(db, trader=FakeTrader(), live=True, notifier=FakeNotifier(),
                   profile=_selective_profile(), portfolio_usd=TEST_PORTFOLIO_USD)
-    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+    row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
     ex.handle_poll([row])
     assert len(captured) == 1
     assert "BUY NO" in captured[0]
     assert "BUY YES" not in captured[0]
 
 
+def test_intended_orders_migration_adds_calibrated_prob(tmp_path):
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        """
+        CREATE TABLE intended_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            event_ticker TEXT NOT NULL,
+            market_ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
+            action TEXT NOT NULL,
+            limit_price_cents INTEGER NOT NULL,
+            count INTEGER NOT NULL,
+            notional_usd REAL NOT NULL,
+            model_prob REAL NOT NULL,
+            edge_cents REAL NOT NULL,
+            minutes_left REAL NOT NULL,
+            spot REAL NOT NULL,
+            client_order_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            reject_reason TEXT,
+            kalshi_order_id TEXT,
+            raw_response TEXT,
+            bot_id TEXT
+        )
+        """
+    )
+    raw.close()
+    conn = connect(path)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(intended_orders)")}
+        assert "model_prob_calibrated" in cols
+    finally:
+        conn.close()
+
+
+def test_intended_order_records_calibrated_prob(db):
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    row = make_row(
+        model_prob=0.10,
+        model_prob_calibrated=0.12,
+        yes_bid=0.20,
+        yes_ask=0.25,
+        no_ask=0.50,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is True
+    [(raw, cal)] = list(db.execute(
+        "SELECT model_prob, model_prob_calibrated FROM intended_orders"
+    ))
+    assert raw == pytest.approx(0.10)
+    assert cal == pytest.approx(0.12)
+
+
 # ---- PR #6A: top-K orders per poll ----
 
 def test_top_k_places_multiple_distinct_strikes(db, monkeypatch):
-    """Three positive-edge candidates on different strikes → all placed."""
-    from src.executor import MAX_ORDERS_PER_POLL
+    """Distinct-strike cap stops a single event from fanning out too far."""
     stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
     ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
     rows = [
-        make_row(market="KXBTCD-A-T1", strike=80_500.0, model_prob=0.80,
+        make_row(market="KXBTCD-26MAY0113-T80500", strike=80_500.0, model_prob=0.80,
                  yes_bid=0.20, yes_ask=0.25),
-        make_row(market="KXBTCD-A-T2", strike=80_600.0, model_prob=0.80,
+        make_row(market="KXBTCD-26MAY0113-T80600", strike=80_600.0, model_prob=0.80,
                  yes_bid=0.20, yes_ask=0.30),
-        make_row(market="KXBTCD-A-T3", strike=80_700.0, model_prob=0.80,
+        make_row(market="KXBTCD-26MAY0113-T80700", strike=80_700.0, model_prob=0.80,
                  yes_bid=0.20, yes_ask=0.35),
-        make_row(market="KXBTCD-A-T4", strike=80_800.0, model_prob=0.80,
+        make_row(market="KXBTCD-26MAY0113-T80800", strike=80_800.0, model_prob=0.80,
                  yes_bid=0.20, yes_ask=0.40),
     ]
     ex.handle_poll(rows)
-    # K=3 cap; 4 candidates → only 3 intents written.
+    # Event-strike cap binds before K=3.
     n_intents = db.execute("SELECT COUNT(*) FROM intended_orders").fetchone()[0]
-    assert n_intents == MAX_ORDERS_PER_POLL
+    assert n_intents == MAX_OPEN_STRIKES_PER_EVENT_SIDE
+
+
+def test_event_strike_cap_allows_adding_to_existing_market(db, monkeypatch):
+    market = "KXBTCD-26MAY0113-T80500"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=2.50,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={
+            (market, "yes"): 1,
+            ("KXBTCD-26MAY0113-T80600", "yes"): 1,
+        },
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    row = make_row(market=market, strike=80_500.0, model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
+    d = ex.handle_poll([row])
+    assert d.placed is True
 
 
 def test_top_k_running_notional_blocks_later_candidates(db, monkeypatch):
@@ -499,6 +576,47 @@ def test_top_k_running_held_blocks_same_market_repeats(db, monkeypatch):
     ))
     assert len(intents) == 1
     assert intents[0][0] == MAX_CONTRACTS_PER_STRIKE
+
+
+def test_candidate_ordering_prefers_sell_to_close(db, monkeypatch):
+    market_sell = "KXBTCD-ORDER-TSELL"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=2.50,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market_sell, "yes"): 5},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    sell = make_row(market=market_sell, model_prob=0.10, yes_bid=0.50, yes_ask=0.55)
+    buy = make_row(market="KXBTCD-ORDER-TBUY", model_prob=0.80, yes_bid=0.20, yes_ask=0.25)
+    ex.handle_poll([buy, sell])
+    [(side, action, market)] = list(db.execute(
+        "SELECT side, action, market_ticker FROM intended_orders ORDER BY id LIMIT 1"
+    ))
+    assert (side, action, market) == ("yes", "sell", market_sell)
+
+
+def test_candidate_ordering_ranks_buys_by_roi_not_cents(db, monkeypatch):
+    stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
+    ex = Executor(db, trader=None, live=False, profile=_legacy_profile())
+    high_roi = make_row(
+        market="KXBTCD-ROI-THIGH",
+        strike=80_500.0,
+        model_prob=0.20,
+        yes_bid=0.01,
+        yes_ask=0.10,
+    )
+    high_cents = make_row(
+        market="KXBTCD-ROI-TCENTS",
+        strike=80_600.0,
+        model_prob=0.80,
+        yes_bid=0.01,
+        yes_ask=0.60,
+    )
+    ex.handle_poll([high_cents, high_roi])
+    [(market,)] = list(db.execute(
+        "SELECT market_ticker FROM intended_orders ORDER BY id LIMIT 1"
+    ))
+    assert market == "KXBTCD-ROI-THIGH"
 
 
 # ---- Edge-proportional sizing ----

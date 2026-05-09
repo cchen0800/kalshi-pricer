@@ -6,6 +6,7 @@ Read-only. No order placement anywhere in this module.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
@@ -116,8 +117,8 @@ def build_poll_rows(
     `calibrator` is applied post-hoc to `model_prob`; the result is stored as
     `model_prob_calibrated`. The raw `model_prob` is preserved unchanged so
     diagnostics and offline backtests can compare. `edge_cents` here remains
-    the raw-model-vs-mid edge — actionable_edge() reads it for the trade
-    decision and will be retargeted to the calibrated value in PR #3.
+    the raw-model-vs-mid edge (display only). All edge functions used by
+    actionable_edge() read the calibrated probability via _row_calibrated_mp().
     """
     if calibrator is None:
         calibrator = identity_calibrator()
@@ -196,6 +197,7 @@ BUY_YES_GATE_MIN_SIGMA = 0.50      # 60-min annualized realized vol
 BUY_NO_GATE_MIN_SIGMA = 0.20
 BUY_GATE_MIN_SIGMA = BUY_YES_GATE_MIN_SIGMA  # legacy alias for shadow logging
 BUY_GATE_MIN_DIST_PCT = 0.0010     # |strike - spot| / spot
+BUY_GATE_MIN_DIST_Z = 0.30         # |strike - spot| / expected move to close
 BUY_GATE_MIN_MINUTES = 15.0        # minutes left to close
 # Calibrated mp band: backtest shows BUY/SELL alpha lives strictly inside
 # this band. Outside it the calibrator is fit on sparse tail data and the
@@ -212,23 +214,39 @@ def _row_calibrated_mp(row: PollRow) -> float:
     return row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob
 
 
-def _passes_buy_gates(row: PollRow, side: str) -> bool:
+def _passes_buy_gates(row: PollRow, side: str, policy: "SidePolicy | None" = None) -> bool:
     """Per-side regime gate. Only the σ floor differs between BUY_YES and
     BUY_NO; dist / T / mp-band are shared. `side` must be 'BUY_YES' or
     'BUY_NO'."""
     if side == "BUY_YES":
         sigma_min = BUY_YES_GATE_MIN_SIGMA
     elif side == "BUY_NO":
-        sigma_min = BUY_NO_GATE_MIN_SIGMA
+        sigma_min = (
+            policy.buy_no_min_sigma
+            if policy is not None and policy.buy_no_min_sigma is not None
+            else BUY_NO_GATE_MIN_SIGMA
+        )
+        if row.no_ask is None:
+            return False
+        if policy is not None and policy.buy_no_min_ask is not None and row.no_ask < policy.buy_no_min_ask:
+            return False
+        if policy is not None and policy.buy_no_max_ask is not None and row.no_ask > policy.buy_no_max_ask:
+            return False
     else:
         raise ValueError(f"_passes_buy_gates: side must be BUY_YES|BUY_NO, got {side!r}")
-    if row.sigma is None or row.sigma < sigma_min:
+    if row.sigma is None or row.sigma <= 0 or row.sigma < sigma_min:
         return False
     if row.spot is None or row.spot <= 0 or row.strike is None:
         return False
     if abs(row.strike - row.spot) / row.spot < BUY_GATE_MIN_DIST_PCT:
         return False
-    if row.minutes_left is None or row.minutes_left < BUY_GATE_MIN_MINUTES:
+    if row.minutes_left is None or row.minutes_left <= 0 or row.minutes_left < BUY_GATE_MIN_MINUTES:
+        return False
+    tau_years = row.minutes_left / 525_600.0
+    expected_move = row.spot * row.sigma * math.sqrt(tau_years)
+    if expected_move <= 0:
+        return False
+    if abs(row.strike - row.spot) / expected_move < BUY_GATE_MIN_DIST_Z:
         return False
     cal_mp = _row_calibrated_mp(row)
     if not (BUY_GATE_MP_BAND_LO <= cal_mp < BUY_GATE_MP_BAND_HI):
@@ -241,18 +259,19 @@ def _net_edges(row: PollRow) -> tuple[float | None, float | None]:
 
     Either may be None when the corresponding book side is missing. Negative
     values indicate the model disagrees with the book in that direction.
-    Used by shadow signal logging (which writes a YES-only schema). For full
-    side coverage including BUY_NO, see _all_net_edges()."""
+    Uses calibrated model_prob when available so edge reflects the same
+    probability the gate checks against."""
+    mp = _row_calibrated_mp(row)
     if row.yes_ask is not None:
         ask_cents = int(round(row.yes_ask * 100))
         fee = kalshi_fee_cents(max(1, min(99, ask_cents)), 1)
-        buy: float | None = row.model_prob * 100.0 - row.yes_ask * 100.0 - fee
+        buy: float | None = mp * 100.0 - row.yes_ask * 100.0 - fee
     else:
         buy = None
     if row.yes_bid is not None:
         bid_cents = int(round(row.yes_bid * 100))
         fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
-        sell: float | None = row.yes_bid * 100.0 - row.model_prob * 100.0 - fee
+        sell: float | None = row.yes_bid * 100.0 - mp * 100.0 - fee
     else:
         sell = None
     return buy, sell
@@ -262,33 +281,32 @@ def _buy_no_net(row: PollRow) -> float | None:
     """Post-fee edge of a BUY_NO at no_ask.
 
     Buying NO at no_ask wins (1 - no_ask) when YES does NOT settle, which the
-    model says happens with prob (1 - model_prob). EV per contract:
-        (1 - model_prob) * 100  - no_ask * 100  - fee(no_ask)
-    Same structure as BUY_YES with (model_prob, yes_ask) → (1-model_prob, no_ask).
+    model says happens with prob (1 - mp). Uses calibrated model_prob so that
+    the edge computation is consistent with the gate's probability view.
     Returns None when no_ask is missing.
     """
     if row.no_ask is None:
         return None
+    mp = _row_calibrated_mp(row)
     ask_cents = int(round(row.no_ask * 100))
     fee = kalshi_fee_cents(max(1, min(99, ask_cents)), 1)
-    return (1.0 - row.model_prob) * 100.0 - row.no_ask * 100.0 - fee
+    return (1.0 - mp) * 100.0 - row.no_ask * 100.0 - fee
 
 
 def _sell_no_net(row: PollRow) -> float | None:
     """Post-fee edge of a SELL_NO at no_bid (closing a long NO).
 
     Selling NO at no_bid means receiving no_bid in exchange for giving up a
-    contract worth (1 - model_prob) in expectation. EV per contract:
-        no_bid * 100  - (1 - model_prob) * 100  - fee(no_bid)
-    Symmetric to SELL_YES with (yes_bid, model_prob) → (no_bid, 1-model_prob).
+    contract worth (1 - mp) in expectation. Uses calibrated model_prob.
     Positive when the book is overpaying for our NO relative to model fair value.
     Returns None when no_bid is missing.
     """
     if row.no_bid is None:
         return None
+    mp = _row_calibrated_mp(row)
     bid_cents = int(round(row.no_bid * 100))
     fee = kalshi_fee_cents(max(1, min(99, bid_cents)), 1)
-    return row.no_bid * 100.0 - (1.0 - row.model_prob) * 100.0 - fee
+    return row.no_bid * 100.0 - (1.0 - mp) * 100.0 - fee
 
 
 def _gate_flags(row: PollRow) -> tuple[int, int, int, int]:
@@ -319,6 +337,9 @@ class SidePolicy:
     allow_buy_yes: bool = True
     allow_buy_no: bool = False
     sell_yes_to_close_only: bool = False
+    buy_no_min_sigma: float | None = None
+    buy_no_min_ask: float | None = None
+    buy_no_max_ask: float | None = None
 
 
 LEGACY_POLICY = SidePolicy(allow_buy_yes=True, allow_buy_no=False, sell_yes_to_close_only=False)
@@ -354,11 +375,11 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
 
     buy_yes_eligible = (
         policy.allow_buy_yes and buy_yes > 0
-        and _passes_buy_gates(row, "BUY_YES")
+        and _passes_buy_gates(row, "BUY_YES", policy)
     )
     buy_no_eligible = (
         policy.allow_buy_no and buy_no > 0
-        and _passes_buy_gates(row, "BUY_NO")
+        and _passes_buy_gates(row, "BUY_NO", policy)
     )
     sell_yes_eligible = sell_yes > 0  # ungated; executor enforces inventory
     sell_no_eligible = sell_no > 0    # ungated; executor enforces inventory
@@ -378,22 +399,29 @@ def actionable_edge(row: PollRow, policy: SidePolicy = LEGACY_POLICY) -> tuple[s
     return candidates[0]
 
 
-def build_shadow_signals(rows: Iterable[PollRow]) -> list[ShadowSignal]:
-    """One row per (poll, market) where either raw side has positive net edge.
+def build_shadow_signals(
+    rows: Iterable[PollRow],
+    policy: SidePolicy = LEGACY_POLICY,
+) -> list[ShadowSignal]:
+    """One row per (poll, market) where any side has positive net edge.
 
     Persists what the engine *thought* — not just what it traded — so future
     backtests can ask "what if σ floor were 0.40?" without re-running the
-    pricer over poll history. Skipping rows where both sides are negative
-    keeps volume sane (most rows in calm markets fall here)."""
+    pricer over poll history. Skipping rows where all sides are negative
+    keeps volume sane (most rows in calm markets fall here).
+
+    `policy` is forwarded to actionable_edge() so chosen_side reflects the
+    bot's actual configuration rather than always defaulting to LEGACY_POLICY."""
     out: list[ShadowSignal] = []
     for row in rows:
         buy_net, sell_net = _net_edges(row)
-        # Only log "interesting" rows — at least one side must look tradeable
-        # before fees, otherwise this is just noise duplicating polls.
-        if (buy_net is None or buy_net <= 0) and (sell_net is None or sell_net <= 0):
+        buy_no_net = _buy_no_net(row)
+        sell_no_net = _sell_no_net(row)
+        edges = [e for e in (buy_net, sell_net, buy_no_net, sell_no_net) if e is not None]
+        if not edges or max(edges) <= 0:
             continue
         sig_p, dist_p, time_p, band_p = _gate_flags(row)
-        side, cents = actionable_edge(row)
+        side, cents = actionable_edge(row, policy)
         out.append(ShadowSignal(
             ts_ms=row.ts_ms,
             event_ticker=row.event_ticker,
@@ -405,8 +433,12 @@ def build_shadow_signals(rows: Iterable[PollRow]) -> list[ShadowSignal]:
             model_prob=row.model_prob,
             yes_bid=row.yes_bid,
             yes_ask=row.yes_ask,
+            no_bid=row.no_bid,
+            no_ask=row.no_ask,
             buy_edge_net_cents=buy_net,
             sell_edge_net_cents=sell_net,
+            buy_no_edge_net_cents=buy_no_net,
+            sell_no_edge_net_cents=sell_no_net,
             gate_sigma_passed=sig_p,
             gate_dist_passed=dist_p,
             gate_time_passed=time_p,
@@ -426,6 +458,7 @@ def run_one_poll(
     on_poll: Callable[[list[PollRow]], None] | None = None,
     averagers: dict[str, RealizedAverager] | None = None,
     calibrator: IsotonicCalibrator | None = None,
+    shadow_policy: SidePolicy = LEGACY_POLICY,
 ) -> float | None:
     """Run one poll cycle. Returns seconds_to_settlement of the active event,
     or None if no open event was found. The outer loop uses this to switch
@@ -492,7 +525,7 @@ def run_one_poll(
         drift_per_year=cfg.spot_drift_per_year,
     )
     n = insert_polls(db, rows)
-    shadows = build_shadow_signals(rows)
+    shadows = build_shadow_signals(rows, policy=shadow_policy)
     if shadows:
         try:
             insert_shadow_signals(db, shadows)
@@ -532,6 +565,7 @@ def run(
     cfg: EngineConfig,
     stop_event: threading.Event | None = None,
     on_poll: Callable[[list[PollRow]], None] | None = None,
+    shadow_policy: SidePolicy = LEGACY_POLICY,
 ) -> None:
     """Run the polling loop.
 
@@ -572,6 +606,7 @@ def run(
                     kc=kc, feed=feed, cfg=cfg, db=db,
                     on_poll=on_poll, averagers=averagers,
                     calibrator=calibrator,
+                    shadow_policy=shadow_policy,
                 )
             except KeyboardInterrupt:
                 log.info("interrupted, exiting")

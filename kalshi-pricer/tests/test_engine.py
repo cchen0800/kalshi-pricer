@@ -386,8 +386,8 @@ def test_selective_policy_picks_buy_no_over_sell_yes_when_higher():
     """Selective profile = (False, True, True). When BUY_NO and SELL_YES
     both have positive edge, the larger one wins."""
     # YES bid 50¢, model 10¢ → SELL edge ~40 - fee.
-    # NO ask 5¢, model 10¢ → BUY_NO edge: 90 - 5 - fee ≈ 85.
-    row = make_row(model_prob=0.10, yes_bid=0.50, yes_ask=0.55, no_ask=0.05)
+    # NO ask 50¢, model 10¢ → BUY_NO edge: 90 - 50 - fee ≈ 38.
+    row = make_row(model_prob=0.10, yes_bid=0.50, yes_ask=0.55, no_ask=0.50)
     pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=True)
     side, _ = actionable_edge(row, pol)
     assert side == "BUY_NO"
@@ -440,13 +440,13 @@ def test_executor_selective_profile_places_buy_no(tmp_path):
     db = connect(tmp_path / "t.db")
     try:
         ex = Executor(db, trader=None, live=False, profile=BOT_PROFILES["selective"])
-        row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
+        row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
         d = ex.handle_poll([row])
         assert d.placed is True
         assert d.ticket is not None
         assert d.ticket.action == "buy"
         assert d.ticket.side == "no"
-        assert d.ticket.limit_price_cents == 5  # round(no_ask=0.05 * 100)
+        assert d.ticket.limit_price_cents == 50
     finally:
         db.close()
 
@@ -464,7 +464,7 @@ def test_band_gate_blocks_buy_no_below_lower_bound():
     """model_prob 0.04 (< 0.05 lower bound) → BUY_NO blocked under selective.
     Use a small yes_bid so SELL_YES edge is also negative — isolates the
     band gate as the only thing that could have allowed BUY_NO."""
-    row = make_row(model_prob=0.04, yes_bid=0.02, yes_ask=0.05, no_ask=0.05)
+    row = make_row(model_prob=0.04, yes_bid=0.02, yes_ask=0.05, no_ask=0.50)
     pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=True)
     side, _ = actionable_edge(row, pol)
     assert side != "BUY_NO"
@@ -494,6 +494,139 @@ def test_band_gate_uses_calibrated_when_available():
     )
     side, _ = actionable_edge(row)
     assert side == "BUY_YES"
+
+
+def test_calibrated_prob_shrinks_buy_no_edge():
+    """When the calibrator raises model_prob (toward YES), BUY_NO edge must
+    shrink because P(NO) = 1 - calibrated_mp is lower than 1 - raw_mp.
+    This is the core fix: edge computation must use calibrated probability."""
+    base = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25, no_ask=0.25)
+    # Calibrator says YES is actually 0.45, not 0.30.
+    calibrated = PollRow(
+        ts_ms=base.ts_ms, event_ticker=base.event_ticker,
+        market_ticker=base.market_ticker, strike=base.strike, spot=base.spot,
+        sigma=base.sigma, minutes_left=base.minutes_left,
+        model_prob=base.model_prob, yes_bid=base.yes_bid, yes_ask=base.yes_ask,
+        yes_bid_size=base.yes_bid_size, yes_ask_size=base.yes_ask_size,
+        no_bid=base.no_bid, no_ask=base.no_ask, volume=base.volume,
+        edge_cents=base.edge_cents, model_prob_calibrated=0.45,
+    )
+    pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=True)
+    _, edge_raw = actionable_edge(base, pol)
+    _, edge_cal = actionable_edge(calibrated, pol)
+    # Raw: (1-0.30)*100 - 25 - fee = 45 - fee
+    # Cal: (1-0.45)*100 - 25 - fee = 30 - fee
+    assert edge_cal < edge_raw
+    fee = kalshi_fee_cents(25, 1)
+    assert edge_raw == pytest.approx(45.0 - fee)
+    assert edge_cal == pytest.approx(30.0 - fee)
+
+
+def test_calibrated_prob_expands_buy_no_edge():
+    """When the calibrator lowers model_prob (away from YES), BUY_NO edge
+    grows because P(NO) = 1 - calibrated_mp is higher."""
+    base = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25, no_ask=0.50)
+    calibrated = PollRow(
+        ts_ms=base.ts_ms, event_ticker=base.event_ticker,
+        market_ticker=base.market_ticker, strike=base.strike, spot=base.spot,
+        sigma=base.sigma, minutes_left=base.minutes_left,
+        model_prob=base.model_prob, yes_bid=base.yes_bid, yes_ask=base.yes_ask,
+        yes_bid_size=base.yes_bid_size, yes_ask_size=base.yes_ask_size,
+        no_bid=base.no_bid, no_ask=base.no_ask, volume=base.volume,
+        edge_cents=base.edge_cents, model_prob_calibrated=0.20,
+    )
+    pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=True)
+    _, edge_raw = actionable_edge(base, pol)
+    _, edge_cal = actionable_edge(calibrated, pol)
+    assert edge_cal > edge_raw
+
+
+def test_selective_buy_no_policy_blocks_outside_price_band():
+    pol = SidePolicy(
+        allow_buy_yes=False,
+        allow_buy_no=True,
+        buy_no_min_ask=0.50,
+        buy_no_max_ask=0.75,
+    )
+    cheap = make_row(model_prob=0.10, yes_bid=0.02, yes_ask=0.25, no_ask=0.49)
+    rich = make_row(model_prob=0.10, yes_bid=0.02, yes_ask=0.25, no_ask=0.76)
+    ok = make_row(model_prob=0.10, yes_bid=0.02, yes_ask=0.25, no_ask=0.50)
+    assert actionable_edge(cheap, pol)[0] == "NONE"
+    assert actionable_edge(rich, pol)[0] == "NONE"
+    assert actionable_edge(ok, pol)[0] == "BUY_NO"
+
+
+def test_selective_buy_no_policy_uses_sigma_override():
+    pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, buy_no_min_sigma=0.30)
+    row = make_row(model_prob=0.10, yes_bid=0.02, yes_ask=0.25, no_ask=0.50, sigma=0.29)
+    assert actionable_edge(row, pol)[0] == "NONE"
+
+
+def test_buy_gate_blocks_low_vol_unit_distance():
+    # Percent distance passes: 0.125% > 0.10%. Expected-move distance fails.
+    row = make_row(
+        model_prob=0.80,
+        yes_bid=0.20,
+        yes_ask=0.25,
+        strike=80_100.0,
+        spot=80_000.0,
+        sigma=0.60,
+        minutes_left=30.0,
+    )
+    assert actionable_edge(row)[0] == "NONE"
+
+
+def test_calibrated_prob_grows_sell_no_edge():
+    """When calibrator raises model_prob, SELL_NO edge grows because our NO
+    position is worth less (lower P(NO)), so selling at no_bid is better."""
+    base = make_row(model_prob=0.30, yes_bid=0.05, yes_ask=0.40,
+                    no_bid=0.80, no_ask=0.95)
+    calibrated = PollRow(
+        ts_ms=base.ts_ms, event_ticker=base.event_ticker,
+        market_ticker=base.market_ticker, strike=base.strike, spot=base.spot,
+        sigma=base.sigma, minutes_left=base.minutes_left,
+        model_prob=base.model_prob, yes_bid=base.yes_bid, yes_ask=base.yes_ask,
+        yes_bid_size=base.yes_bid_size, yes_ask_size=base.yes_ask_size,
+        no_bid=base.no_bid, no_ask=base.no_ask, volume=base.volume,
+        edge_cents=base.edge_cents, model_prob_calibrated=0.45,
+    )
+    _, edge_raw = actionable_edge(base)
+    _, edge_cal = actionable_edge(calibrated)
+    # Both should be SELL_NO. Cal should be larger because P(NO) is lower.
+    fee = kalshi_fee_cents(80, 1)
+    # Raw: 80 - (1-0.30)*100 - fee = 80 - 70 - fee = 10 - fee
+    # Cal: 80 - (1-0.45)*100 - fee = 80 - 55 - fee = 25 - fee
+    assert edge_cal > edge_raw
+    assert edge_raw == pytest.approx(10.0 - fee)
+    assert edge_cal == pytest.approx(25.0 - fee)
+
+
+def test_shadow_signal_includes_no_side_edges():
+    """Shadow signals must now include BUY_NO and SELL_NO edge fields."""
+    row = make_row(model_prob=0.30, yes_bid=0.05, yes_ask=0.40,
+                   no_bid=0.80, no_ask=0.25)
+    sigs = build_shadow_signals([row])
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s.no_bid == pytest.approx(0.80)
+    assert s.no_ask == pytest.approx(0.25)
+    # BUY_NO: (1-0.30)*100 - 25 - fee(25) = 45 - fee
+    assert s.buy_no_edge_net_cents is not None and s.buy_no_edge_net_cents > 0
+    # SELL_NO: 80 - (1-0.30)*100 - fee(80) = 10 - fee
+    assert s.sell_no_edge_net_cents is not None and s.sell_no_edge_net_cents > 0
+
+
+def test_shadow_signal_respects_policy():
+    """build_shadow_signals with selective policy should yield BUY_NO as
+    chosen_side, not BUY_YES."""
+    row = make_row(model_prob=0.30, yes_bid=0.20, yes_ask=0.25, no_ask=0.25)
+    pol = SidePolicy(allow_buy_yes=False, allow_buy_no=True, sell_yes_to_close_only=True)
+    sigs = build_shadow_signals([row], policy=pol)
+    assert len(sigs) == 1
+    assert sigs[0].chosen_side == "BUY_NO"
+    # Same row with legacy policy should yield BUY_YES (or NONE if gates block)
+    sigs_legacy = build_shadow_signals([row])
+    assert sigs_legacy[0].chosen_side != "BUY_NO"
 
 
 def test_band_gate_inclusive_at_lo_exclusive_at_hi():

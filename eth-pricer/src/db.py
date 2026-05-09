@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS intended_orders (
     count               INTEGER NOT NULL,
     notional_usd        REAL    NOT NULL,
     model_prob          REAL    NOT NULL,
+    model_prob_calibrated REAL,                     -- calibrated model_prob used for order EV; NULL on legacy rows
     edge_cents          REAL    NOT NULL,
     minutes_left        REAL    NOT NULL,
     spot                REAL    NOT NULL,
@@ -90,7 +91,7 @@ CREATE TABLE IF NOT EXISTS portfolio_settlements (
 );
 
 -- Audit log of engine decisions: one row per (poll, market) where the model
--- saw a positive raw edge on either side, regardless of whether gates blocked
+-- saw a positive raw edge on any side, regardless of whether gates blocked
 -- the trade. This is what enables retroactive "what if we'd loosened σ to
 -- 0.40?" analysis without re-running the pricer over poll history.
 CREATE TABLE IF NOT EXISTS shadow_signals (
@@ -105,13 +106,17 @@ CREATE TABLE IF NOT EXISTS shadow_signals (
     model_prob               REAL    NOT NULL,
     yes_bid                  REAL,
     yes_ask                  REAL,
+    no_bid                   REAL,
+    no_ask                   REAL,
     buy_edge_net_cents       REAL,                   -- post-fee BUY_YES edge; NULL if no ask
     sell_edge_net_cents      REAL,                   -- post-fee SELL_YES edge; NULL if no bid
+    buy_no_edge_net_cents    REAL,                   -- post-fee BUY_NO edge; NULL if no NO ask
+    sell_no_edge_net_cents   REAL,                   -- post-fee SELL_NO edge; NULL if no NO bid
     gate_sigma_passed        INTEGER NOT NULL,       -- 0/1
     gate_dist_passed         INTEGER NOT NULL,
     gate_time_passed         INTEGER NOT NULL,
     gate_mp_band_passed      INTEGER,                -- 0/1; calibrated mp ∈ [0.05, 0.85). NULL on legacy rows.
-    chosen_side              TEXT    NOT NULL,       -- 'BUY_YES' | 'BUY_NO' | 'SELL_YES' | 'NONE'
+    chosen_side              TEXT    NOT NULL,       -- 'BUY_YES' | 'BUY_NO' | 'SELL_YES' | 'SELL_NO' | 'NONE'
     chosen_edge_cents        REAL    NOT NULL        -- what actionable_edge() returned
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ts        ON shadow_signals(ts_ms);
@@ -180,6 +185,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(intended_orders)")}
     if "bot_id" not in cols:
         conn.execute("ALTER TABLE intended_orders ADD COLUMN bot_id TEXT")
+    if "model_prob_calibrated" not in cols:
+        conn.execute("ALTER TABLE intended_orders ADD COLUMN model_prob_calibrated REAL")
     # Always ensure the index exists (covers both fresh and migrated DBs;
     # has to run after the ALTER above on old DBs).
     conn.execute(
@@ -200,6 +207,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     shadow_cols = {r[1] for r in conn.execute("PRAGMA table_info(shadow_signals)")}
     if "gate_mp_band_passed" not in shadow_cols:
         conn.execute("ALTER TABLE shadow_signals ADD COLUMN gate_mp_band_passed INTEGER")
+    if "no_bid" not in shadow_cols:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN no_bid REAL")
+    if "no_ask" not in shadow_cols:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN no_ask REAL")
+    if "buy_no_edge_net_cents" not in shadow_cols:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN buy_no_edge_net_cents REAL")
+    if "sell_no_edge_net_cents" not in shadow_cols:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN sell_no_edge_net_cents REAL")
 
 
 @contextmanager
@@ -242,8 +257,12 @@ class ShadowSignal:
     model_prob: float
     yes_bid: float | None
     yes_ask: float | None
+    no_bid: float | None
+    no_ask: float | None
     buy_edge_net_cents: float | None
     sell_edge_net_cents: float | None
+    buy_no_edge_net_cents: float | None
+    sell_no_edge_net_cents: float | None
     gate_sigma_passed: int
     gate_dist_passed: int
     gate_time_passed: int
@@ -259,12 +278,16 @@ def insert_shadow_signals(conn: sqlite3.Connection, rows: Iterable[ShadowSignal]
     sql = """
         INSERT INTO shadow_signals (
             ts_ms, event_ticker, market_ticker, strike, spot, sigma, minutes_left,
-            model_prob, yes_bid, yes_ask, buy_edge_net_cents, sell_edge_net_cents,
+            model_prob, yes_bid, yes_ask, no_bid, no_ask,
+            buy_edge_net_cents, sell_edge_net_cents,
+            buy_no_edge_net_cents, sell_no_edge_net_cents,
             gate_sigma_passed, gate_dist_passed, gate_time_passed, gate_mp_band_passed,
             chosen_side, chosen_edge_cents
         ) VALUES (
             :ts_ms, :event_ticker, :market_ticker, :strike, :spot, :sigma, :minutes_left,
-            :model_prob, :yes_bid, :yes_ask, :buy_edge_net_cents, :sell_edge_net_cents,
+            :model_prob, :yes_bid, :yes_ask, :no_bid, :no_ask,
+            :buy_edge_net_cents, :sell_edge_net_cents,
+            :buy_no_edge_net_cents, :sell_no_edge_net_cents,
             :gate_sigma_passed, :gate_dist_passed, :gate_time_passed, :gate_mp_band_passed,
             :chosen_side, :chosen_edge_cents
         )
