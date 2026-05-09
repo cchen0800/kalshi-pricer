@@ -147,8 +147,8 @@ BOT_PROFILES: dict[str, BotProfile] = {
     "aggressive": BotProfile(
         bot_id="sol-aggressive",
         coid_prefix="sola-",
-        max_notional_pct=0.0,
-        max_daily_loss_pct=0.0,
+        max_notional_pct=0.15,
+        max_daily_loss_pct=0.05,
         min_edge_cents=3.0,
         kill_file=Path(".kill.aggressive"),
         policy=LEGACY_POLICY,
