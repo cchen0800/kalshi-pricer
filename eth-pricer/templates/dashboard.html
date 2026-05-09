@@ -876,8 +876,9 @@
 <body>
 
 <nav class="asset-switcher">
-  <a href="https://trade.baggaar.com/">BTC</a>
-  <a class="active" href="https://eth.baggaar.com/">ETH</a>
+  <a href="/">BTC</a>
+  <a class="active" href="/eth/">ETH</a>
+  <a href="/sol/">SOL</a>
 </nav>
 
 <header class="hero">
@@ -1152,6 +1153,7 @@
 </main>
 
 <script>
+const BASE = "/eth";
 const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
 const fmtPctInt = n => n == null ? "—" : Math.round(n * 100) + "%";
@@ -1265,7 +1267,7 @@ function classifyRow(s, threshold) {
 async function refresh() {
   let resp, data;
   try {
-    resp = await fetch("/api/state", {cache: "no-store"});
+    resp = await fetch(BASE + "/api/state", {cache: "no-store"});
     data = await resp.json();
   } catch (e) {
     document.getElementById("status").textContent = "Error fetching state: " + e;
@@ -1369,7 +1371,7 @@ function tickClose() {
 
 async function refreshSpot() {
   try {
-    const resp = await fetch("/api/spot", {cache: "no-store"});
+    const resp = await fetch(BASE + "/api/spot", {cache: "no-store"});
     if (!resp.ok) return;
     const data = await resp.json();
     const el = document.getElementById("spot");
@@ -1417,7 +1419,7 @@ const fmtTimeEt = ts_ms => {
 async function refreshTrades() {
   let resp, data;
   try {
-    resp = await fetch(`/api/trades?bot=${encodeURIComponent(selectedBot)}&limit=100`,
+    resp = await fetch(`${BASE}/api/trades?bot=${encodeURIComponent(selectedBot)}&limit=100`,
                        {cache: "no-store"});
     data = await resp.json();
   } catch (e) {
@@ -1634,7 +1636,7 @@ function drawPnlChart() {
 
 async function refreshPnlChart() {
   try {
-    const resp = await fetch("/api/pnl_series", {cache: "no-store"});
+    const resp = await fetch(BASE + "/api/pnl_series", {cache: "no-store"});
     const data = await resp.json();
     _pnlSel = data.selective || [];
     _pnlAgg = data.aggressive || [];
@@ -1669,6 +1671,7 @@ if (_M && !_reducedMotion) {
       { opacity: [0, 1], transform: ["translateY(6px)", "translateY(0)"] },
       { duration: 0.32, delay: _M.stagger(0.05), easing: [0.2, 0, 0, 1] });
   });
+  setTimeout(() => { bootEls.forEach(el => { if (el.style.opacity === "0") el.style.opacity = "1"; }); }, 600);
 }
 </script>
 

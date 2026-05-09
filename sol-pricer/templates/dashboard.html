@@ -858,9 +858,9 @@
 <body>
 
 <nav class="asset-switcher">
-  <a class="active" href="/">BTC</a>
+  <a href="/">BTC</a>
   <a href="/eth/">ETH</a>
-  <a href="/sol/">SOL</a>
+  <a class="active" href="/sol/">SOL</a>
 </nav>
 
 <header class="hero">
@@ -1144,7 +1144,7 @@
 </main>
 
 <script>
-const BASE = "";
+const BASE = "/sol";
 const fmtMoney = n => n == null ? "—" : "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1) + "%";
 const fmtPctInt = n => n == null ? "—" : Math.round(n * 100) + "%";
@@ -1392,7 +1392,7 @@ const strikeFromTicker = mt => {
   return isNaN(n) ? last : "above $" + Math.ceil(n).toLocaleString();
 };
 const eventLabel = et => {
-  // KXBTCD-26MAY0222 / KXETHD-26MAY0817 → "MAY 02 10 PM"
+  // KXSOLD-26MAY0222 → "MAY 02 10 PM"
   const m = (et || "").match(/^KX[A-Z]+-(\d{2})([A-Z]{3})(\d{2})(\d{2})$/);
   if (!m) return et || "—";
   const h = parseInt(m[4], 10);

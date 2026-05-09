@@ -1,0 +1,17 @@
+[Unit]
+Description=eth-pricer ETH aggressive bot (live trader, no Telegram listener)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/kalshi-pricers/eth-pricer
+ExecStart=/home/chris/kalshi-pricers/eth-pricer/.venv/bin/python trade.py --live --profile aggressive --yes-i-know --no-telegram-listen
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/chris/kalshi-pricers/eth-pricer/logs/aggressive.log
+StandardError=append:/home/chris/kalshi-pricers/eth-pricer/logs/aggressive.log
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
