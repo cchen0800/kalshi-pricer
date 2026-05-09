@@ -46,6 +46,19 @@
   .hero {
     padding: 28px 32px 22px;
     border-bottom: 1px solid var(--hairline);
+    display: flex;
+    align-items: flex-start;
+    gap: 32px;
+  }
+  .hero-left { flex: 0 0 auto; min-width: 0; }
+  .hero-right {
+    flex: 1 1 0;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    position: relative;
+    padding-top: 8px;
   }
   .live-tag {
     display: inline-flex;
@@ -115,6 +128,93 @@
   }
   .stale .live-tag { color: var(--yellow); }
   .stale .hero-price { color: var(--yellow); }
+
+  /* P&L Chart */
+  .pnl-chart-body {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+  }
+  .pnl-chart-wrap {
+    flex: 1 1 auto;
+    height: 110px;
+    position: relative;
+  }
+  .pnl-chart-wrap canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .pnl-y-axis {
+    flex: 0 0 auto;
+    width: 44px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 2px 0;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-3);
+  }
+  .pnl-x-axis {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    margin-right: 52px;
+    font-size: 10px;
+    color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+  }
+  .pnl-chart-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .pnl-chart-value {
+    font-size: 22px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .pnl-chart-value.pos { color: var(--green); }
+  .pnl-chart-value.neg { color: var(--red); }
+  .pnl-chart-value.zero { color: var(--fg-3); }
+  .pnl-chart-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .pnl-chart-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--fg-3);
+    font-size: 12px;
+  }
+  .pnl-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 4px;
+    margin-right: 52px;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-2);
+  }
+  .pnl-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .pnl-legend-dot {
+    display: inline-block;
+    width: 10px;
+    height: 2px;
+    border-radius: 1px;
+  }
+  .pnl-legend-dot.sel { background: #00D632; }
+  .pnl-legend-dot.agg { background: #F6B100; }
 
   /* Tabs */
   .tabs {
@@ -476,8 +576,9 @@
   @media (max-width: 720px) {
     body { font-size: 14px; }
 
-    /* Hero — compact */
-    .hero { padding: 14px 16px 12px; }
+    /* Hero — compact, stacked */
+    .hero { padding: 14px 16px 12px; flex-direction: column; gap: 16px; }
+    .hero-right { min-height: 80px; }
     .live-tag { margin-bottom: 6px; font-size: 10.5px; }
     .hero-price { font-size: 30px; line-height: 1.1; }
     .hero-sub { font-size: 13px; line-height: 1.35; }
@@ -780,26 +881,52 @@
 </nav>
 
 <header class="hero">
-  <span class="live-tag">Live</span>
-  <h1 class="hero-price"><span id="spot">—</span></h1>
-  <p class="hero-sub"><span id="event">—</span></p>
-  <div class="hero-metrics">
-    <div class="metric">
-      <span class="metric-label">σ (60m, ann.)</span>
-      <span class="metric-value" id="sigma">—</span>
-      <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
+  <div class="hero-left">
+    <span class="live-tag">Live</span>
+    <h1 class="hero-price"><span id="spot">—</span></h1>
+    <p class="hero-sub"><span id="event">—</span></p>
+    <div class="hero-metrics">
+      <div class="metric">
+        <span class="metric-label">σ (60m, ann.)</span>
+        <span class="metric-value" id="sigma">—</span>
+        <span class="metric-sub" id="sigma-gate">buy gate ≥50%</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Time to close</span>
+        <span class="metric-value" id="ttl">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Edge threshold</span>
+        <span class="metric-value" id="thresh">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Last poll</span>
+        <span class="metric-value" id="age">—</span>
+      </div>
     </div>
-    <div class="metric">
-      <span class="metric-label">Time to close</span>
-      <span class="metric-value" id="ttl">—</span>
+  </div>
+  <div class="hero-right">
+    <div class="pnl-chart-header">
+      <span class="pnl-chart-value zero" id="pnl-chart-value">—</span>
+      <span class="pnl-chart-label">Combined Realized P&L</span>
     </div>
-    <div class="metric">
-      <span class="metric-label">Edge threshold</span>
-      <span class="metric-value" id="thresh">—</span>
+    <div class="pnl-chart-body">
+      <div class="pnl-chart-wrap" id="pnl-chart-wrap">
+        <canvas id="pnl-chart"></canvas>
+        <div class="pnl-chart-empty" id="pnl-chart-empty">No settled trades yet</div>
+      </div>
+      <div class="pnl-y-axis">
+        <span id="pnl-y-max">—</span>
+        <span id="pnl-y-min">—</span>
+      </div>
     </div>
-    <div class="metric">
-      <span class="metric-label">Last poll</span>
-      <span class="metric-value" id="age">—</span>
+    <div class="pnl-x-axis">
+      <span id="pnl-x-start"></span>
+      <span id="pnl-x-end"></span>
+    </div>
+    <div class="pnl-legend">
+      <span class="pnl-legend-item"><span class="pnl-legend-dot sel"></span><span>Selective</span><span id="pnl-legend-sel">—</span></span>
+      <span class="pnl-legend-item"><span class="pnl-legend-dot agg"></span><span>Aggressive</span><span id="pnl-legend-agg">—</span></span>
     </div>
   </div>
 </header>
@@ -1359,14 +1486,10 @@ async function refreshTrades() {
     const edgeCls = t.edge_cents > 0 ? "pos" : t.edge_cents < 0 ? "neg" : "";
     const edgeStr = (t.edge_cents >= 0 ? "+" : "") + t.edge_cents.toFixed(1) + "¢";
     let outcomeCell, outcomeCls;
-    if (t.settled && t.fill_price_cents != null) {
+    if (t.settled) {
       const won = t.market_result === t.side;
       outcomeCell = won ? "WON" : "LOST";
       outcomeCls = won ? "outcome-won" : "outcome-lost";
-    } else if (t.settled) {
-      // Market settled but our order never filled — bot took no position.
-      outcomeCell = "no fill";
-      outcomeCls = "muted";
     } else if (t.status === "submitted") {
       outcomeCell = t.fill_price_cents != null ? "open" : "resting";
       outcomeCls = "outcome-open";
@@ -1408,17 +1531,142 @@ async function refreshTrades() {
   }
 }
 
+// ─── P&L chart (selective + aggressive overlay) ──────────────────────────
+const _pnlCanvas = document.getElementById("pnl-chart");
+const _pnlCtx = _pnlCanvas.getContext("2d");
+const _pnlValueEl = document.getElementById("pnl-chart-value");
+const _pnlEmptyEl = document.getElementById("pnl-chart-empty");
+const SEL_COLOR = "#00D632";
+const AGG_COLOR = "#F6B100";
+let _pnlSel = [];
+let _pnlAgg = [];
+
+function _fmtAxisUsd(n) {
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  const abs = Math.abs(n);
+  if (abs >= 1000) return sign + "$" + (abs / 1000).toFixed(1) + "k";
+  if (abs >= 100) return sign + "$" + abs.toFixed(0);
+  return sign + "$" + abs.toFixed(2);
+}
+function _fmtAxisDate(ms) {
+  return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function drawPnlChart() {
+  const wrap = document.getElementById("pnl-chart-wrap");
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  _pnlCanvas.width = w * dpr;
+  _pnlCanvas.height = h * dpr;
+  _pnlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const yMaxEl = document.getElementById("pnl-y-max");
+  const yMinEl = document.getElementById("pnl-y-min");
+  const xStartEl = document.getElementById("pnl-x-start");
+  const xEndEl = document.getElementById("pnl-x-end");
+  const legSelEl = document.getElementById("pnl-legend-sel");
+  const legAggEl = document.getElementById("pnl-legend-agg");
+
+  const selFinal = _pnlSel.length ? _pnlSel[_pnlSel.length - 1].pnl : 0;
+  const aggFinal = _pnlAgg.length ? _pnlAgg[_pnlAgg.length - 1].pnl : 0;
+  legSelEl.textContent = _pnlSel.length ? fmtSignedUsd(selFinal) : "—";
+  legSelEl.style.color = selFinal > 0 ? "var(--green)" : selFinal < 0 ? "var(--red)" : "var(--fg-3)";
+  legAggEl.textContent = _pnlAgg.length ? fmtSignedUsd(aggFinal) : "—";
+  legAggEl.style.color = aggFinal > 0 ? "var(--green)" : aggFinal < 0 ? "var(--red)" : "var(--fg-3)";
+
+  const combined = selFinal + aggFinal;
+  _pnlValueEl.textContent = fmtSignedUsd(combined);
+  _pnlValueEl.className = "pnl-chart-value " + (combined > 0 ? "pos" : combined < 0 ? "neg" : "zero");
+
+  const totalPts = _pnlSel.length + _pnlAgg.length;
+  if (totalPts < 2) {
+    _pnlCanvas.style.display = "none";
+    _pnlEmptyEl.style.display = "flex";
+    yMaxEl.textContent = ""; yMinEl.textContent = "";
+    xStartEl.textContent = ""; xEndEl.textContent = "";
+    return;
+  }
+  _pnlCanvas.style.display = "block";
+  _pnlEmptyEl.style.display = "none";
+
+  const pad = { top: 6, bottom: 6, left: 4, right: 6 };
+  const cw = w - pad.left - pad.right;
+  const ch = h - pad.top - pad.bottom;
+
+  const allVals = [..._pnlSel.map(p => p.pnl), ..._pnlAgg.map(p => p.pnl)];
+  const allTs = [..._pnlSel.map(p => p.ts_ms), ..._pnlAgg.map(p => p.ts_ms)];
+  const dataMin = Math.min(0, ...allVals);
+  const dataMax = Math.max(0, ...allVals);
+  let minV = dataMin, maxV = dataMax;
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  const span = maxV - minV;
+  minV -= span * 0.08;
+  maxV += span * 0.08;
+  const range = maxV - minV;
+
+  const tMin = Math.min(...allTs);
+  const tMax = Math.max(...allTs);
+  const tSpan = tMax - tMin || 1;
+
+  const xOf = ts => pad.left + ((ts - tMin) / tSpan) * cw;
+  const yOf = v => pad.top + (1 - (v - minV) / range) * ch;
+
+  const ctx = _pnlCtx;
+  ctx.clearRect(0, 0, w, h);
+
+  const zeroY = yOf(0);
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(pad.left, zeroY);
+  ctx.lineTo(w - pad.right, zeroY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const drawSeries = (pts, color) => {
+    if (pts.length < 1) return;
+    ctx.beginPath();
+    ctx.moveTo(xOf(pts[0].ts_ms), yOf(pts[0].pnl));
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(xOf(pts[i].ts_ms), yOf(pts[i].pnl));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.75;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+  };
+  drawSeries(_pnlSel, SEL_COLOR);
+  drawSeries(_pnlAgg, AGG_COLOR);
+
+  yMaxEl.textContent = _fmtAxisUsd(dataMax);
+  yMinEl.textContent = _fmtAxisUsd(dataMin);
+  xStartEl.textContent = _fmtAxisDate(tMin);
+  xEndEl.textContent = _fmtAxisDate(tMax);
+}
+
+async function refreshPnlChart() {
+  try {
+    const resp = await fetch("/api/pnl_series", {cache: "no-store"});
+    const data = await resp.json();
+    _pnlSel = data.selective || [];
+    _pnlAgg = data.aggressive || [];
+  } catch (e) { /* silent */ }
+  drawPnlChart();
+}
+
+refreshPnlChart();
+window.addEventListener("resize", drawPnlChart);
+
 refresh();
 refreshSpot();
 setInterval(refresh, 2000);
 setInterval(refreshSpot, 1500);
 setInterval(tickClose, 1000);
-// Refresh trades data periodically when the tab is open. Cheap when hidden
-// because we only fetch on tab activation; this just keeps it fresh while
-// the user is looking at it.
 setInterval(() => {
   if (!document.getElementById("tab-trades").hidden) refreshTrades();
 }, 15000);
+setInterval(refreshPnlChart, 30000);
 
 // Boot: gentle fade-up of the chrome on first paint.
 if (_M && !_reducedMotion) {

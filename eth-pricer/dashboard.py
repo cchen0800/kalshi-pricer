@@ -33,7 +33,7 @@ from src.db import open_db
 from src.engine import EngineConfig, event_close_utc, run as run_engine
 from src.executor import BOT_PROFILES
 from src.notify import TelegramNotifier
-from src.trade_history import list_trades, summarize
+from src.trade_history import list_trades, pnl_series, summarize
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -293,6 +293,20 @@ def api_trades(limit: int = 50, bot: str = "selective") -> JSONResponse:
     if profile is not None:
         s["max_notional_pct"] = profile.max_notional_pct
     return JSONResponse({"trades": trades, "summary": s, "bot": bot})
+
+
+@app.get("/api/pnl_series")
+def api_pnl_series() -> JSONResponse:
+    """Cumulative P&L over time for both bots (selective + aggressive)."""
+    cfg: EngineConfig = _state["cfg"]
+    trader = _state.get("trader")
+    selective_path = cfg.db_path
+    aggressive_path = _state.get("aggressive_db") or cfg.db_path
+    with open_db(selective_path) as db:
+        sel = pnl_series(db, trader, mode="live")
+    with open_db(aggressive_path) as db:
+        agg = pnl_series(db, trader, mode="live")
+    return JSONResponse({"selective": sel, "aggressive": agg})
 
 
 @app.get("/api/visitors")
