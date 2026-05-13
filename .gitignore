@@ -15,6 +15,7 @@ __pycache__/
 *.db-journal
 *.db-wal
 *.db-shm
+.telegram_alert_subscribers
 
 # macOS
 .DS_Store

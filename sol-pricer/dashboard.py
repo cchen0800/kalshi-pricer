@@ -117,6 +117,7 @@ async def lifespan(app: FastAPI):
     notifier = TelegramNotifier(
         token=os.environ.get("SCREENER_BOT_TOKEN"),
         chat_id=os.environ.get("SCREENER_CHAT_ID"),
+        include_alert_subscribers=False,
     )
     access_log = AccessLogger(
         log_dir=ROOT / "logs",
