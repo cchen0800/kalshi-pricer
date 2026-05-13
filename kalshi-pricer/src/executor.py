@@ -130,6 +130,9 @@ class BotProfile:
     min_edge_cents: float         # NET-of-fee edge floor (see engine.actionable_edge)
     kill_file: Path
     policy: SidePolicy = LEGACY_POLICY  # which sides may be entered/closed
+    sell_no_hysteresis_minutes: float | None = None
+    sell_no_hysteresis_min_edge_cents: float | None = None
+    sell_no_hysteresis_min_yes_prob: float | None = None
 
 
 BOT_PROFILES: dict[str, BotProfile] = {
@@ -155,6 +158,12 @@ BOT_PROFILES: dict[str, BotProfile] = {
             buy_no_min_ask=0.50,
             buy_no_max_ask=0.75,
         ),
+        # 2026-05-12 parity review: BTC SELL_NO exits have not been as costly
+        # as ETH's late dump, but the same cheap protection avoids weak
+        # near-close exits unless edge is decisive or YES probability is high.
+        sell_no_hysteresis_minutes=10.0,
+        sell_no_hysteresis_min_edge_cents=8.0,
+        sell_no_hysteresis_min_yes_prob=0.95,
     ),
     # btc-aggressive disabled (negative P&L over live window). Profile kept
     # so existing DB / fill history stays parseable; just don't launch it.
@@ -434,6 +443,15 @@ class Executor:
             if held <= 0:
                 log.debug("skip SELL_NO on %s: no NO position", row.market_ticker)
                 return None
+            if self._blocks_sell_no_hysteresis(row, edge):
+                log.debug(
+                    "skip SELL_NO on %s: hysteresis edge=%.2f mp=%.3f T-%.1fm",
+                    row.market_ticker,
+                    edge,
+                    row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob,
+                    row.minutes_left,
+                )
+                return None
         else:
             return None
 
@@ -532,6 +550,17 @@ class Executor:
         if side_label == "SELL_NO" and row.no_bid is not None:
             return int(round(row.no_bid * 100))
         return None
+
+    def _blocks_sell_no_hysteresis(self, row: PollRow, edge: float) -> bool:
+        minutes = self.profile.sell_no_hysteresis_minutes
+        min_edge = self.profile.sell_no_hysteresis_min_edge_cents
+        min_yes_prob = self.profile.sell_no_hysteresis_min_yes_prob
+        if minutes is None or min_edge is None or min_yes_prob is None:
+            return False
+        if row.minutes_left is None or row.minutes_left > minutes:
+            return False
+        mp = row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob
+        return edge < min_edge and mp < min_yes_prob
 
     def _place(self, ticket: OrderTicket) -> Decision:
         coid = ticket.client_order_id

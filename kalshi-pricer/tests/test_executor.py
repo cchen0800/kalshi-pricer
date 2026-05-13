@@ -244,6 +244,57 @@ def test_sell_no_allowed_with_no_position(db, monkeypatch):
     assert d.ticket.count <= 7
 
 
+def test_selective_sell_no_hysteresis_blocks_weak_near_close_exit(db, monkeypatch):
+    """A weak late SELL_NO edge should not dump a live NO position shortly
+    before settlement."""
+    market = "KXBTCD-HYST-T1"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=6.00,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market, "no"): 10},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    row = make_row(
+        market=market,
+        model_prob=0.30,
+        model_prob_calibrated=0.914,
+        yes_bid=0.01,
+        yes_ask=0.99,
+        no_bid=0.13,
+        no_ask=0.95,
+        minutes_left=8.0,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is False
+    assert list(db.execute("SELECT * FROM intended_orders")) == []
+
+
+def test_selective_sell_no_hysteresis_allows_high_yes_prob_exit(db, monkeypatch):
+    """The hysteresis is AND-gated: high YES confidence can still exit even
+    when the SELL_NO edge is below the hysteresis edge threshold."""
+    market = "KXBTCD-HYST-T2"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=6.00,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market, "no"): 10},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    row = make_row(
+        market=market,
+        model_prob=0.30,
+        model_prob_calibrated=0.96,
+        yes_bid=0.01,
+        yes_ask=0.99,
+        no_bid=0.12,
+        no_ask=0.95,
+        minutes_left=8.0,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is True
+    assert d.ticket.action == "sell"
+    assert d.ticket.side == "no"
+
+
 def test_daily_loss_limit_blocks(db, monkeypatch):
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=0.0,
