@@ -629,6 +629,30 @@ def test_shadow_signal_respects_policy():
     assert sigs_legacy[0].chosen_side != "BUY_NO"
 
 
+def test_shadow_sigma_flag_uses_policy_specific_buy_no_floor():
+    """Selective BUY_NO telemetry should not inherit BUY_YES's higher sigma
+    floor. This keeps shadow scans aligned with the executor's policy."""
+    row = make_row(
+        model_prob=0.10,
+        yes_bid=0.02,
+        yes_ask=0.25,
+        no_ask=0.50,
+        sigma=0.30,
+    )
+    pol = SidePolicy(
+        allow_buy_yes=False,
+        allow_buy_no=True,
+        sell_yes_to_close_only=True,
+        buy_no_min_sigma=0.30,
+        buy_no_min_ask=0.50,
+        buy_no_max_ask=0.75,
+    )
+    sigs = build_shadow_signals([row], policy=pol)
+    assert len(sigs) == 1
+    assert sigs[0].chosen_side == "BUY_NO"
+    assert sigs[0].gate_sigma_passed == 1
+
+
 def test_band_gate_inclusive_at_lo_exclusive_at_hi():
     """Band semantics: [0.05, 0.85). Exact 0.05 passes; exact 0.85 blocks."""
     # At mp=0.05, NO is "worth" 95c. no_ask=0.50 → BUY_NO net = 95-50-fee(50)=43c.

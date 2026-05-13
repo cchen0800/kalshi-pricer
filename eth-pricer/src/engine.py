@@ -313,9 +313,31 @@ def _sell_no_net(row: PollRow) -> float | None:
     return row.no_bid * 100.0 - (1.0 - mp) * 100.0 - fee
 
 
-def _gate_flags(row: PollRow) -> tuple[int, int, int, int]:
-    """Per-gate pass booleans for shadow logging. Mirrors _passes_buy_gates."""
-    sig = int(row.sigma is not None and row.sigma >= BUY_GATE_MIN_SIGMA)
+def _gate_sigma_min(policy: "SidePolicy | None" = None) -> float:
+    """Sigma floor to display in generic shadow gate telemetry.
+
+    Shadow rows have one sigma flag, while live policies can enable BUY_YES,
+    BUY_NO, or both. Use the least strict enabled BUY-side floor so policy
+    specific shadow logs don't mark a BUY_NO-eligible row as failed just
+    because BUY_YES has a higher volatility gate.
+    """
+    if policy is None:
+        policy = LEGACY_POLICY
+    floors: list[float] = []
+    if policy.allow_buy_yes:
+        floors.append(BUY_YES_GATE_MIN_SIGMA)
+    if policy.allow_buy_no:
+        floors.append(
+            policy.buy_no_min_sigma
+            if policy.buy_no_min_sigma is not None
+            else BUY_NO_GATE_MIN_SIGMA
+        )
+    return min(floors) if floors else BUY_GATE_MIN_SIGMA
+
+
+def _gate_flags(row: PollRow, policy: "SidePolicy | None" = None) -> tuple[int, int, int, int]:
+    """Per-gate pass booleans for shadow logging. Mirrors the active policy."""
+    sig = int(row.sigma is not None and row.sigma >= _gate_sigma_min(policy))
     if row.spot is None or row.spot <= 0 or row.strike is None:
         dist = 0
     else:
@@ -427,7 +449,7 @@ def build_shadow_signals(
             and (sell_no_net is None or sell_no_net <= 0)
         ):
             continue
-        sig_p, dist_p, time_p, band_p = _gate_flags(row)
+        sig_p, dist_p, time_p, band_p = _gate_flags(row, policy)
         side, cents = actionable_edge(row, policy)
         out.append(ShadowSignal(
             ts_ms=row.ts_ms,

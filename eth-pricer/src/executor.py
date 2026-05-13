@@ -129,6 +129,9 @@ class BotProfile:
     min_edge_cents: float         # NET-of-fee edge floor (see engine.actionable_edge)
     kill_file: Path
     policy: SidePolicy = LEGACY_POLICY  # which sides may be entered/closed
+    sell_no_hysteresis_minutes: float | None = None
+    sell_no_hysteresis_min_edge_cents: float | None = None
+    sell_no_hysteresis_min_yes_prob: float | None = None
 
 
 BOT_PROFILES: dict[str, BotProfile] = {
@@ -155,11 +158,21 @@ BOT_PROFILES: dict[str, BotProfile] = {
             buy_no_min_ask=0.50,
             buy_no_max_ask=0.75,
         ),
+        # 2026-05-12 live readout: a late SELL_NO at T-7.95m with only
+        # +3.4c model edge sold a winning NO position for 13c. Near close,
+        # only exit NO if the edge is decisive or the model is very sure YES
+        # will win; otherwise let settlement do the work.
+        sell_no_hysteresis_minutes=10.0,
+        sell_no_hysteresis_min_edge_cents=8.0,
+        sell_no_hysteresis_min_yes_prob=0.95,
     ),
     "aggressive": BotProfile(
         bot_id="eth-aggressive",
         coid_prefix="etha-",
-        max_notional_pct=0.15,
+        # Paused after the 2026-05-12 live window: BUY_YES tail entries went
+        # 0/5 and the shadow bucket was 0/10. Keep the service parseable and
+        # able to close existing inventory, but block fresh buys via notional.
+        max_notional_pct=0.0,
         max_daily_loss_pct=0.05,
         min_edge_cents=3.0,
         kill_file=Path(".kill.aggressive"),
@@ -453,6 +466,15 @@ class Executor:
             if held <= 0:
                 log.debug("skip SELL_NO on %s: no long position", row.market_ticker)
                 return None
+            if self._blocks_sell_no_hysteresis(row, edge):
+                log.debug(
+                    "skip SELL_NO on %s: hysteresis edge=%.2f mp=%.3f T-%.1fm",
+                    row.market_ticker,
+                    edge,
+                    row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob,
+                    row.minutes_left,
+                )
+                return None
         else:
             return None
 
@@ -531,6 +553,17 @@ class Executor:
             spot=row.spot,
             coid_prefix=self.profile.coid_prefix,
         )
+
+    def _blocks_sell_no_hysteresis(self, row: PollRow, edge: float) -> bool:
+        minutes = self.profile.sell_no_hysteresis_minutes
+        min_edge = self.profile.sell_no_hysteresis_min_edge_cents
+        min_yes_prob = self.profile.sell_no_hysteresis_min_yes_prob
+        if minutes is None or min_edge is None or min_yes_prob is None:
+            return False
+        if row.minutes_left is None or row.minutes_left > minutes:
+            return False
+        mp = row.model_prob_calibrated if row.model_prob_calibrated is not None else row.model_prob
+        return edge < min_edge and mp < min_yes_prob
 
     def _place(self, ticket: OrderTicket) -> Decision:
         coid = ticket.client_order_id

@@ -244,6 +244,70 @@ def test_sell_no_allowed_with_no_position(db, monkeypatch):
     assert d.ticket.count <= 7
 
 
+def test_selective_sell_no_hysteresis_blocks_weak_near_close_exit(db, monkeypatch):
+    """A weak late SELL_NO edge should not dump a live NO position shortly
+    before settlement. This locks the 2026-05-12 ETH loss pattern."""
+    market = "KXETHD-HYST-T1"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=6.00,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market, "no"): 10},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    row = make_row(
+        market=market,
+        model_prob=0.30,
+        model_prob_calibrated=0.914,
+        yes_bid=0.01,
+        yes_ask=0.99,
+        no_bid=0.13,
+        no_ask=0.95,
+        minutes_left=8.0,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is False
+    assert list(db.execute("SELECT * FROM intended_orders")) == []
+
+
+def test_selective_sell_no_hysteresis_allows_decisive_near_close_exit(db, monkeypatch):
+    market = "KXETHD-HYST-T2"
+    stub_snapshot(monkeypatch, PositionSnapshot(
+        open_notional_usd=6.00,
+        realized_pnl_today_usd=0.0,
+        open_contracts_by_market={(market, "no"): 10},
+    ))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    row = make_row(
+        market=market,
+        model_prob=0.30,
+        model_prob_calibrated=0.914,
+        yes_bid=0.01,
+        yes_ask=0.99,
+        no_bid=0.20,
+        no_ask=0.95,
+        minutes_left=8.0,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is True
+    assert d.ticket.action == "sell"
+    assert d.ticket.side == "no"
+
+
+def test_eth_aggressive_profile_blocks_fresh_buy_yes_exposure(db, monkeypatch):
+    """Aggressive is paused by setting its opening-notional budget to zero."""
+    stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
+    ex = Executor(db, trader=None, live=False, profile=BOT_PROFILES["aggressive"])
+    row = make_row(
+        market="KXETHD-AGGPAUSE-T1",
+        model_prob=0.08,
+        yes_bid=0.01,
+        yes_ask=0.01,
+    )
+    d = ex.handle_poll([row])
+    assert d.placed is False
+    assert list(db.execute("SELECT * FROM intended_orders")) == []
+
+
 def test_daily_loss_limit_blocks(db, monkeypatch):
     stub_snapshot(monkeypatch, PositionSnapshot(
         open_notional_usd=0.0,
