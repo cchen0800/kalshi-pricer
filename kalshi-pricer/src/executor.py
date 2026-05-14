@@ -598,11 +598,11 @@ class Executor:
                 """
                 SELECT spot
                 FROM polls
-                WHERE event_ticker = ? AND ts_ms <= ?
+                WHERE ts_ms <= ?
                 ORDER BY ts_ms DESC
                 LIMIT 1
                 """,
-                (row.event_ticker, row.ts_ms - lookback_ms),
+                (row.ts_ms - lookback_ms,),
             ).fetchone()
             if prior is None or prior[0] is None or prior[0] <= 0:
                 continue
