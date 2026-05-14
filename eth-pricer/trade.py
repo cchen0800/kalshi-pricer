@@ -160,7 +160,10 @@ def main() -> int:
             # Local mirror of Kalshi fills + settlements, for offline analysis.
             # Throttled to once / 60s — the dashboard reads live so we don't
             # need fresher than that here.
-            syncer = FillSyncer(trader, interval_s=60.0) if trader is not None else None
+            syncer = (
+                FillSyncer(trader, interval_s=60.0, notifier=notifier)
+                if trader is not None else None
+            )
             # Ground-truth resolution scrape for *every* settled market — fills
             # the gap that portfolio_settlements only covers markets we held.
             # 5min cadence: events close hourly, so this is far more than enough.

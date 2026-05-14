@@ -261,14 +261,8 @@ def test_no_rows_above_threshold(db):
     assert d.placed is False
 
 
-def test_order_notification_escapes_markdown_specials(db, monkeypatch):
-    """Regression: previously the post-fill status 'submitted (order_id=...)'
-    contained an underscore that opened an unclosed Markdown italic, and the
-    Telegram API rejected every order alert with a 400. The notifier swallows
-    400s by design (must not block trading), so trades went unnotified.
-
-    Verify the message body contains no bare underscores or asterisks outside
-    the literal '*[LIVE] BUY YES*' bold markers."""
+def test_live_order_submission_does_not_notify(db, monkeypatch):
+    """Telegram should alert on fills, not on order submission."""
     captured: list[str] = []
 
     class FakeNotifier:
@@ -287,18 +281,7 @@ def test_order_notification_escapes_markdown_specials(db, monkeypatch):
     row = make_row(market="KXSOLD-X-T1", model_prob=0.80, yes_ask=0.25, yes_bid=0.20)
     d = ex.handle_poll([row])
     assert d.placed is True
-    assert len(captured) == 1
-    msg = captured[0]
-    # The only allowed unescaped * are the two surrounding *[LIVE] BUY YES*.
-    # Strip those, then any remaining * is a bug.
-    body_after_bold = msg.split("*", 2)[-1]  # everything after the closing bold *
-    assert "*" not in body_after_bold
-    # The order_id is uuid-shaped (contains underscores in some Kalshi builds)
-    # and used to break Markdown parsing. The current notifier drops it from
-    # the user-facing message entirely — verify it's nowhere in the body.
-    assert "fecc03f0" not in msg
-    assert "with_underscores" not in msg
-    assert "order_id" not in msg
+    assert captured == []
 
 
 def test_fail_closed_when_snapshot_unavailable(db, monkeypatch):
@@ -412,8 +395,8 @@ def test_buy_no_live_posts_side_no(db, monkeypatch):
     assert captured["limit_price_cents"] == 5
 
 
-def test_buy_no_telegram_label(db, monkeypatch):
-    """BUY_NO must show 'BUY NO' in the Telegram alert, not 'BUY YES'."""
+def test_buy_no_submission_does_not_notify(db, monkeypatch):
+    """BUY_NO submissions are silent; fill sync owns Telegram alerts."""
     captured: list[str] = []
 
     class FakeNotifier:
@@ -430,9 +413,7 @@ def test_buy_no_telegram_label(db, monkeypatch):
                   profile=_selective_profile(), portfolio_usd=TEST_PORTFOLIO_USD)
     row = make_row(model_prob=0.10, yes_bid=0.20, yes_ask=0.25, no_ask=0.05)
     ex.handle_poll([row])
-    assert len(captured) == 1
-    assert "BUY NO" in captured[0]
-    assert "BUY YES" not in captured[0]
+    assert captured == []
 
 
 # ---- PR #6A: top-K orders per poll ----

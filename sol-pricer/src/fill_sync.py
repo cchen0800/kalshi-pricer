@@ -17,13 +17,18 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
 from src.kalshi_trader import KalshiTrader
+from src.notify import TelegramNotifier
 
 log = logging.getLogger("fill_sync")
+
+_EVENT_RE = re.compile(r"^KX(?:SOL|ETH|BTC)D-(\d{2})([A-Z]{3})(\d{2})(\d{2})$")
 
 
 def _f(v: Any) -> float:
@@ -33,6 +38,33 @@ def _f(v: Any) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _md_escape(s: str) -> str:
+    for ch in ("_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
+def _format_strike(market_ticker: str) -> str:
+    last = market_ticker.rsplit("-", 1)[-1]
+    if not last.startswith("T"):
+        return last
+    try:
+        n = float(last[1:])
+    except ValueError:
+        return last
+    return f"above ${math.ceil(n):,d}"
+
+
+def _format_event(event_ticker: str) -> str:
+    m = _EVENT_RE.match(event_ticker or "")
+    if not m:
+        return event_ticker or "-"
+    h = int(m.group(4))
+    h12 = (h % 12) or 12
+    ampm = "AM" if h < 12 else "PM"
+    return f"{m.group(2)} {m.group(3)} {h12} {ampm} ET"
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -53,7 +85,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def sync_fills(conn: sqlite3.Connection, trader: KalshiTrader, *, limit: int = 200) -> int:
+def sync_fills(
+    conn: sqlite3.Connection,
+    trader: KalshiTrader,
+    *,
+    limit: int = 200,
+    on_new_fill: Callable[[dict[str, Any]], None] | None = None,
+) -> int:
     """Pull recent fills from Kalshi and upsert into the local fills table.
 
     Links each fill back to its originating intended_order via kalshi_order_id.
@@ -67,11 +105,35 @@ def sync_fills(conn: sqlite3.Connection, trader: KalshiTrader, *, limit: int = 2
     if not fills:
         return 0
 
-    order_id_to_intent: dict[str, int] = {}
+    order_id_to_intent: dict[str, dict[str, Any]] = {}
     for r in conn.execute(
-        "SELECT id, kalshi_order_id FROM intended_orders WHERE kalshi_order_id IS NOT NULL"
+        """
+        SELECT id, mode, event_ticker, market_ticker, side, action,
+               limit_price_cents, count, notional_usd, model_prob,
+               model_prob_calibrated, edge_cents, minutes_left, spot,
+               kalshi_order_id, bot_id
+        FROM intended_orders
+        WHERE kalshi_order_id IS NOT NULL
+        """
     ).fetchall():
-        order_id_to_intent[r[1]] = r[0]
+        order_id_to_intent[r[14]] = {
+            "id": r[0],
+            "mode": r[1],
+            "event_ticker": r[2],
+            "market_ticker": r[3],
+            "side": r[4],
+            "action": r[5],
+            "limit_price_cents": r[6],
+            "count": r[7],
+            "notional_usd": r[8],
+            "model_prob": r[9],
+            "model_prob_calibrated": r[10],
+            "edge_cents": r[11],
+            "minutes_left": r[12],
+            "spot": r[13],
+            "kalshi_order_id": r[14],
+            "bot_id": r[15],
+        }
 
     new = 0
     for f in fills:
@@ -97,7 +159,8 @@ def sync_fills(conn: sqlite3.Connection, trader: KalshiTrader, *, limit: int = 2
             except Exception:
                 ts_ms = int(time.time() * 1000)
         order_id = f.get("order_id")
-        intent_id = order_id_to_intent.get(order_id) if order_id else None
+        intent = order_id_to_intent.get(order_id) if order_id else None
+        intent_id = intent["id"] if intent else None
 
         cur = conn.execute(
             """
@@ -115,6 +178,17 @@ def sync_fills(conn: sqlite3.Connection, trader: KalshiTrader, *, limit: int = 2
         )
         if cur.rowcount:
             new += 1
+            if on_new_fill is not None and intent is not None:
+                on_new_fill({
+                    **intent,
+                    "fill_side": side,
+                    "fill_action": action,
+                    "fill_price_cents": fill_price_cents,
+                    "fill_count": count,
+                    "fill_fee_usd": fee,
+                    "fill_cash_delta_usd": cash_delta,
+                    "kalshi_trade_id": trade_id,
+                })
     return new
 
 
@@ -174,9 +248,16 @@ class FillSyncer:
     """Throttled wrapper. Call .maybe_sync() liberally — actual API calls
     happen at most once per `interval_s`."""
 
-    def __init__(self, trader: KalshiTrader, *, interval_s: float = 60.0) -> None:
+    def __init__(
+        self,
+        trader: KalshiTrader,
+        *,
+        interval_s: float = 60.0,
+        notifier: TelegramNotifier | None = None,
+    ) -> None:
         self.trader = trader
         self.interval_s = interval_s
+        self.notifier = notifier
         self._last_run = 0.0
         self._schema_ready = False
 
@@ -189,9 +270,47 @@ class FillSyncer:
             if not self._schema_ready:
                 _ensure_schema(conn)
                 self._schema_ready = True
-            nf = sync_fills(conn, self.trader)
+            nf = sync_fills(
+                conn,
+                self.trader,
+                on_new_fill=self._notify_fill if self._notifications_enabled() else None,
+            )
             ns = sync_settlements(conn, self.trader)
             if nf or ns:
                 log.info("fill_sync: +%d fills, +%d settlements", nf, ns)
         except Exception:
             log.exception("fill_sync failed; will retry")
+
+    def _notifications_enabled(self) -> bool:
+        return self.notifier is not None and self.notifier.enabled
+
+    def _notify_fill(self, fill: dict[str, Any]) -> None:
+        if not self._notifications_enabled():
+            return
+        action = str(fill.get("fill_action") or fill.get("action") or "").lower()
+        side = str(fill.get("fill_side") or fill.get("side") or "").lower()
+        if action == "buy":
+            side_word = "BUY NO" if side == "no" else "BUY YES"
+        else:
+            side_word = "SELL NO" if side == "no" else "SELL YES"
+        count = int(fill.get("fill_count") or 0)
+        price_cents = int(fill.get("fill_price_cents") or 0)
+        notional_usd = (price_cents / 100.0) * count
+        model_prob = fill.get("model_prob_calibrated")
+        if model_prob is None:
+            model_prob = fill.get("model_prob")
+        bot_md = _md_escape(str(fill.get("bot_id") or "bot"))
+        mode_md = _md_escape(str(fill.get("mode") or "live").upper())
+        strike_md = _md_escape(_format_strike(str(fill.get("market_ticker") or "")))
+        event_md = _md_escape(_format_event(str(fill.get("event_ticker") or "")))
+        msg = (
+            f"*[{mode_md} {bot_md}] {side_word} FILLED*  "
+            f"{count} x {price_cents}¢  (${notional_usd:.2f})\n"
+            f"{strike_md} · {event_md}\n"
+            f"spot ${float(fill.get('spot') or 0):,.0f} · "
+            f"T-{float(fill.get('minutes_left') or 0):.0f}min · "
+            f"model {float(model_prob or 0)*100:.1f}¢ · "
+            f"edge +{float(fill.get('edge_cents') or 0):.1f}¢\n"
+            f"_filled_"
+        )
+        self.notifier.send(msg)

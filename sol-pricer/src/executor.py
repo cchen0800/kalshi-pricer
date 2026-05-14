@@ -494,7 +494,6 @@ class Executor:
                 ticket.action.upper(), ticket.side, ticket.count, ticket.limit_price_cents,
                 ticket.market_ticker, ticket.edge_cents, ticket.model_prob * 100, ticket.minutes_left,
             )
-            self._notify(ticket, mode="DRY-RUN", status="logged")
             self._order_times.append(time.time())
             return Decision(True, "dry_run", ticket)
 
@@ -534,7 +533,6 @@ class Executor:
             ticket.action.upper(), ticket.side, ticket.count, ticket.limit_price_cents,
             ticket.market_ticker, order_id,
         )
-        self._notify(ticket, mode="LIVE", status=f"submitted (order_id={order_id})")
         self._order_times.append(time.time())
         if order_id:
             self._schedule_cancel(order_id, delay_s=ORDER_TTL_SECONDS)
