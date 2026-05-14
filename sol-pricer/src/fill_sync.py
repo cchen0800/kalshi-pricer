@@ -181,6 +181,7 @@ def sync_fills(
             if on_new_fill is not None and intent is not None:
                 on_new_fill({
                     **intent,
+                    "ts_ms": ts_ms,
                     "fill_side": side,
                     "fill_action": action,
                     "fill_price_cents": fill_price_cents,
@@ -258,6 +259,7 @@ class FillSyncer:
         self.trader = trader
         self.interval_s = interval_s
         self.notifier = notifier
+        self._notify_after_ts_ms = int((time.time() - 5.0) * 1000)
         self._last_run = 0.0
         self._schema_ready = False
 
@@ -286,6 +288,8 @@ class FillSyncer:
 
     def _notify_fill(self, fill: dict[str, Any]) -> None:
         if not self._notifications_enabled():
+            return
+        if int(fill.get("ts_ms") or 0) < self._notify_after_ts_ms:
             return
         action = str(fill.get("fill_action") or fill.get("action") or "").lower()
         side = str(fill.get("fill_side") or fill.get("side") or "").lower()

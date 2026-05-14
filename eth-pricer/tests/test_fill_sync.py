@@ -72,6 +72,7 @@ def test_fill_sync_notifies_new_matched_fill_once(db):
         "created_time": "2026-05-13T21:03:00Z",
     }
     syncer = FillSyncer(FakeTrader([fill]), interval_s=0, notifier=notifier)
+    syncer._notify_after_ts_ms = 0
 
     syncer.maybe_sync(db)
     syncer.maybe_sync(db)
