@@ -109,6 +109,7 @@ def test_fill_sync_does_not_notify_unmatched_fill(db):
     syncer.maybe_sync(db)
 
     assert notifier.messages == []
+    assert db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
 
 
 def test_fill_sync_notifies_sell_no_using_intended_side(db):

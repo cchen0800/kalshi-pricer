@@ -36,6 +36,7 @@ from src.engine import LEGACY_POLICY, SidePolicy, actionable_edge
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramNotifier
 from src.positions import snapshot
+from src.account_risk import account_loss_today_usd
 
 log = logging.getLogger("executor")
 
@@ -114,6 +115,13 @@ _MAX_NOTIONAL_CEILING_PCT = 1.0       # no profile can exceed 100% of portfolio
 _MAX_DAILY_LOSS_CEILING_PCT = 0.50    # no profile can lose >50% of portfolio/day
 _HARD_NOTIONAL_CEILING_USD = 100.0    # backstop: balance-fetch bug can't unlock infinite
 _HARD_DAILY_LOSS_CEILING_USD = 50.0
+_ACCOUNT_DAILY_LOSS_PCT = 0.025       # shared cross-bot stop; 2.5% of account
+_HARD_ACCOUNT_DAILY_LOSS_CEILING_USD = 35.0
+_BUY_NO_TREND_MIN_EDGE_CENTS = 10.0   # weak NO entries must stand down in a rising tape
+_BUY_NO_TREND_LOOKBACKS = (
+    (5 * 60 * 1000, 0.0010),          # +0.10% over 5m
+    (15 * 60 * 1000, 0.0025),         # +0.25% over 15m
+)
 _MIN_EDGE_FLOOR_CENTS = 2.0           # below this, fee + spread will eat the edge
 _BALANCE_CACHE_TTL_S = 30.0           # don't spam Kalshi in fast-poll (3s)
 _DRY_RUN_PORTFOLIO_USD = 1000.0       # synthetic balance for dry-run / tests
@@ -289,6 +297,18 @@ class Executor:
                 f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} "
                 f">= ${max_daily_loss:.2f} ({self.profile.max_daily_loss_pct:.0%} of ${portfolio_usd:.0f})",
             )
+        account_loss = account_loss_today_usd(self.conn)
+        max_account_loss = min(
+            _ACCOUNT_DAILY_LOSS_PCT * portfolio_usd,
+            _HARD_ACCOUNT_DAILY_LOSS_CEILING_USD,
+        )
+        if account_loss is None:
+            return Decision(False, "cannot read shared account loss (fail-closed)")
+        if account_loss >= max_account_loss:
+            return Decision(
+                False,
+                f"account loss limit hit: ${account_loss:.2f} >= ${max_account_loss:.2f}",
+            )
 
         # Guard: time to close. Runs before the candidate scan so we don't
         # waste cycles on a poll we won't act on, and so the message doesn't
@@ -392,6 +412,12 @@ class Executor:
             ticket_side = "no"
             if row.no_ask is None:
                 return None
+            if self._blocks_buy_no_uptrend(row, edge):
+                log.debug(
+                    "skip BUY_NO on %s: rising-tape guard edge=%.2f T-%.1fm",
+                    row.market_ticker, edge, row.minutes_left,
+                )
+                return None
             limit_cents = int(round(row.no_ask * 100))
         elif side_label == "SELL_YES":
             action = "sell"
@@ -481,6 +507,28 @@ class Executor:
             spot=row.spot,
             coid_prefix=self.profile.coid_prefix,
         )
+
+    def _blocks_buy_no_uptrend(self, row: PollRow, edge: float) -> bool:
+        if edge >= _BUY_NO_TREND_MIN_EDGE_CENTS:
+            return False
+        if row.spot is None or row.spot <= 0:
+            return False
+        for lookback_ms, min_up_pct in _BUY_NO_TREND_LOOKBACKS:
+            prior = self.conn.execute(
+                """
+                SELECT spot
+                FROM polls
+                WHERE event_ticker = ? AND ts_ms <= ?
+                ORDER BY ts_ms DESC
+                LIMIT 1
+                """,
+                (row.event_ticker, row.ts_ms - lookback_ms),
+            ).fetchone()
+            if prior is None or prior[0] is None or prior[0] <= 0:
+                continue
+            if (row.spot / float(prior[0]) - 1.0) >= min_up_pct:
+                return True
+        return False
 
     def _place(self, ticket: OrderTicket) -> Decision:
         coid = ticket.client_order_id

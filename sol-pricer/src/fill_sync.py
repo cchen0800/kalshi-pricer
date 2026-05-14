@@ -159,6 +159,8 @@ def sync_fills(
                 ts_ms = int(time.time() * 1000)
         order_id = f.get("order_id")
         intent = order_id_to_intent.get(order_id) if order_id else None
+        if intent is None:
+            continue
         intent_id = intent["id"] if intent else None
         effective_side = intent["side"] if intent else side
         effective_action = intent["action"] if intent else action

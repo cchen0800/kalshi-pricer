@@ -379,6 +379,96 @@ def test_buy_no_dry_run_records_intent_with_side_no(db):
     assert cal_db is None
 
 
+def test_buy_no_uptrend_guard_blocks_weak_entries(db, monkeypatch):
+    stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    now_ms = int(time.time() * 1000)
+    db.execute(
+        """
+        INSERT INTO polls (
+            ts_ms, event_ticker, market_ticker, strike, spot, sigma,
+            minutes_left, model_prob, yes_bid, yes_ask, no_bid, no_ask,
+            volume, edge_cents, proxy_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_ms - 6 * 60 * 1000,
+            "KXBTCD-26MAY0113",
+            "KXBTCD-26MAY0113-T80000",
+            80_000.0,
+            79_800.0,
+            0.50,
+            36.0,
+            0.20,
+            0.20,
+            0.25,
+            0.25,
+            0.70,
+            1000,
+            0.0,
+            "test",
+        ),
+    )
+    row = make_row(
+        model_prob=0.20,
+        yes_bid=0.20,
+        yes_ask=0.25,
+        no_ask=0.70,
+        spot=80_000.0,
+    )
+    row.ts_ms = now_ms
+
+    d = ex.handle_poll([row])
+
+    assert d.placed is False
+    assert list(db.execute("SELECT * FROM intended_orders")) == []
+
+
+def test_buy_no_uptrend_guard_allows_strong_edges(db, monkeypatch):
+    stub_snapshot(monkeypatch, PositionSnapshot(0.0, 0.0))
+    ex = Executor(db, trader=None, live=False, profile=_selective_profile())
+    now_ms = int(time.time() * 1000)
+    db.execute(
+        """
+        INSERT INTO polls (
+            ts_ms, event_ticker, market_ticker, strike, spot, sigma,
+            minutes_left, model_prob, yes_bid, yes_ask, no_bid, no_ask,
+            volume, edge_cents, proxy_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_ms - 6 * 60 * 1000,
+            "KXBTCD-26MAY0113",
+            "KXBTCD-26MAY0113-T80000",
+            80_000.0,
+            79_800.0,
+            0.50,
+            36.0,
+            0.10,
+            0.20,
+            0.25,
+            0.25,
+            0.50,
+            1000,
+            0.0,
+            "test",
+        ),
+    )
+    row = make_row(
+        model_prob=0.10,
+        yes_bid=0.20,
+        yes_ask=0.25,
+        no_ask=0.50,
+        spot=80_000.0,
+    )
+    row.ts_ms = now_ms
+
+    d = ex.handle_poll([row])
+
+    assert d.placed is True
+    assert d.ticket.side == "no"
+
+
 def test_buy_no_concentration_cap_keyed_by_no_side(db, monkeypatch):
     """Already holding 10 NO contracts in a market → no room for more BUY_NO
     in that market. A YES holding in the same market does NOT consume the
