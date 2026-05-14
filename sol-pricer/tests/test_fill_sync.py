@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.db import connect
-from src.fill_sync import FillSyncer
+from src.fill_sync import FillSyncer, sync_sibling_bot_dbs
 
 
 @pytest.fixture
@@ -26,6 +26,14 @@ class FakeTrader:
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         return {"settlements": []}
+
+
+class FailingTrader:
+    def get_fills(self, *, limit: int = 200) -> dict:
+        raise RuntimeError("kalshi down")
+
+    def _request(self, method: str, path: str, **kwargs) -> dict:
+        raise RuntimeError("kalshi down")
 
 
 class FakeNotifier:
@@ -57,8 +65,8 @@ def _insert_intent(
         """,
         (
             int(time.time() * 1000), "live", "KXSOLD-26MAY1315",
-            "KXSOLD-26MAY1315-T91", side, action,
-            limit_price_cents, 10, limit_price_cents / 10.0, 0.267, None, 5.3, 51.0, 91.0,
+            "KXSOLD-26MAY1315-T91.9999", side, action,
+            limit_price_cents, 10, limit_price_cents / 10.0, 0.267, None, 5.3, 51.0, 91.4,
             "solp-client-1", "submitted", order_id, "sol-selective",
         ),
     )
@@ -70,7 +78,7 @@ def test_fill_sync_notifies_new_matched_fill_once(db):
     fill = {
         "trade_id": "trade-1",
         "order_id": "order-1",
-        "ticker": "KXSOLD-26MAY1315-T91",
+        "ticker": "KXSOLD-26MAY1315-T91.9999",
         "side": "no",
         "action": "buy",
         "count": 10,
@@ -96,7 +104,7 @@ def test_fill_sync_does_not_notify_unmatched_fill(db):
     fill = {
         "trade_id": "manual-trade",
         "order_id": "manual-order",
-        "ticker": "KXSOLD-26MAY1315-T91",
+        "ticker": "KXSOLD-26MAY1315-T91.9999",
         "side": "yes",
         "action": "buy",
         "count": 1,
@@ -118,7 +126,7 @@ def test_fill_sync_notifies_sell_no_using_intended_side(db):
     fill = {
         "trade_id": "trade-sell-no",
         "order_id": "order-1",
-        "ticker": "KXSOLD-26MAY1315-T91",
+        "ticker": "KXSOLD-26MAY1315-T91.9999",
         # Kalshi mirrors SELL_NO as side=yes/action=sell with the YES price.
         "side": "yes",
         "action": "sell",
@@ -140,3 +148,44 @@ def test_fill_sync_notifies_sell_no_using_intended_side(db):
         "SELECT cash_delta_usd FROM fills WHERE kalshi_trade_id='trade-sell-no'"
     ).fetchone()[0]
     assert cash_delta == pytest.approx(2.27)
+
+
+def test_required_sync_fails_closed(db):
+    syncer = FillSyncer(FailingTrader(), interval_s=0)
+
+    assert syncer.sync_now(db, required=True) is False
+    assert syncer.sync_now(db, required=False) is True
+
+
+def test_sync_sibling_bot_dbs_updates_matched_sibling_fills(tmp_path):
+    root = tmp_path
+    current_dir = root / "sol-pricer"
+    sibling_dir = root / "eth-pricer"
+    current_dir.mkdir()
+    sibling_dir.mkdir()
+    current = connect(current_dir / "pricer.db")
+    sibling = connect(sibling_dir / "pricer.db")
+    try:
+        _insert_intent(sibling, order_id="sibling-order")
+    finally:
+        sibling.close()
+
+    fill = {
+        "trade_id": "sibling-trade",
+        "order_id": "sibling-order",
+        "ticker": "KXSOLD-26MAY1315-T91.9999",
+        "side": "no",
+        "action": "buy",
+        "count": 10,
+        "no_price_dollars": 0.66,
+        "fee_cost": "0.12",
+        "created_time": "2026-05-13T21:03:00Z",
+    }
+
+    try:
+        assert sync_sibling_bot_dbs(current, FakeTrader([fill]), required=True) is True
+        with sqlite3.connect(sibling_dir / "pricer.db") as check:
+            assert check.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+        assert current.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    finally:
+        current.close()

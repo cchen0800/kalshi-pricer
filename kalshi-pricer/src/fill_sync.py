@@ -1,16 +1,16 @@
 """Periodic sync of Kalshi fills + settlements into the local SQLite DB.
 
-The dashboard already reads Kalshi live for displayed P&L (see trade_history.py),
-so this is purely for offline analysis: calibration sweeps, regime
-backtests, anything that needs to JOIN our intended_orders against actual
-fills/settlements without hitting the API every time.
+The dashboard already reads Kalshi live for displayed P&L (see trade_history.py).
+This module keeps the local DB mirror current for offline analysis and for
+live risk controls that need to JOIN intended_orders against actual fills.
 
 Idempotent: every insert is INSERT OR IGNORE keyed on the Kalshi-side
 identifier (trade_id for fills, market_ticker for settlements), so running
 the sync repeatedly is safe.
 
-The sync is best-effort: any HTTP / parse error is logged and swallowed —
-trading is the priority and stale local mirror data is acceptable.
+Most background syncs are best-effort. Required pre-trade syncs fail closed:
+if Kalshi cannot be reached, the executor must stand down instead of relying
+on stale local mirror data.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import math
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from src.kalshi_trader import KalshiTrader
@@ -29,6 +30,18 @@ from src.notify import TelegramNotifier
 log = logging.getLogger("fill_sync")
 
 _EVENT_RE = re.compile(r"^KX(?:SOL|ETH|BTC)D-(\d{2})([A-Z]{3})(\d{2})(\d{2})$")
+_BOT_DB_RELS = (
+    "kalshi-pricer/pricer.db",
+    "kalshi-pricer/pricer.aggressive.db",
+    "eth-pricer/pricer.db",
+    "eth-pricer/pricer.aggressive.db",
+    "sol-pricer/pricer.db",
+    "sol-pricer/pricer.aggressive.db",
+)
+
+
+class SyncError(RuntimeError):
+    """Raised when a required Kalshi DB sync cannot complete."""
 
 
 def _f(v: Any) -> float:
@@ -85,11 +98,34 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _db_path(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return str(row[2]) if row and row[2] else None
+
+
+def _db_root(conn: sqlite3.Connection) -> Path | None:
+    path_str = _db_path(conn)
+    if not path_str:
+        return None
+    path = Path(path_str).resolve()
+    if path.parent.name in {"kalshi-pricer", "eth-pricer", "sol-pricer"}:
+        return path.parent.parent
+    return path.parent
+
+
+def _connect_sync_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
 def sync_fills(
     conn: sqlite3.Connection,
     trader: KalshiTrader,
     *,
     limit: int = 200,
+    required: bool = False,
     on_new_fill: Callable[[dict[str, Any]], None] | None = None,
 ) -> int:
     """Pull recent fills from Kalshi and upsert into the local fills table.
@@ -100,8 +136,23 @@ def sync_fills(
         data = trader.get_fills(limit=limit)
     except Exception as e:
         log.warning("get_fills failed: %s", e)
+        if required:
+            raise SyncError("get_fills failed") from e
         return 0
-    fills = data.get("fills") or []
+    return sync_fills_from_rows(
+        conn,
+        data.get("fills") or [],
+        on_new_fill=on_new_fill,
+    )
+
+
+def sync_fills_from_rows(
+    conn: sqlite3.Connection,
+    fills: list[dict[str, Any]],
+    *,
+    on_new_fill: Callable[[dict[str, Any]], None] | None = None,
+) -> int:
+    """Upsert a previously fetched /portfolio/fills batch into this DB."""
     if not fills:
         return 0
 
@@ -204,7 +255,11 @@ def sync_fills(
 
 
 def sync_settlements(
-    conn: sqlite3.Connection, trader: KalshiTrader, *, limit: int = 200
+    conn: sqlite3.Connection,
+    trader: KalshiTrader,
+    *,
+    limit: int = 200,
+    required: bool = False,
 ) -> int:
     """Pull recent portfolio settlements and upsert. UNIQUE on market_ticker
     means a re-sync is a no-op; a settled market never re-settles.
@@ -218,8 +273,17 @@ def sync_settlements(
         data = trader._request("GET", "/portfolio/settlements", params={"limit": limit})
     except Exception as e:
         log.warning("get_settlements failed: %s", e)
+        if required:
+            raise SyncError("get_settlements failed") from e
         return 0
-    settlements = data.get("settlements") or []
+    return sync_settlements_from_rows(conn, data.get("settlements") or [])
+
+
+def sync_settlements_from_rows(
+    conn: sqlite3.Connection,
+    settlements: list[dict[str, Any]],
+) -> int:
+    """Upsert a previously fetched /portfolio/settlements batch into this DB."""
     if not settlements:
         return 0
 
@@ -273,11 +337,12 @@ class FillSyncer:
         self._last_run = 0.0
         self._schema_ready = False
 
-    def maybe_sync(self, conn: sqlite3.Connection) -> None:
-        now = time.time()
-        if now - self._last_run < self.interval_s:
-            return
-        self._last_run = now
+    def sync_now(self, conn: sqlite3.Connection, *, required: bool = False) -> bool:
+        """Synchronize this DB immediately.
+
+        Returns False when a required sync fails. Best-effort callers get the
+        old behavior: failures are logged and the process keeps running.
+        """
         try:
             if not self._schema_ready:
                 _ensure_schema(conn)
@@ -285,13 +350,26 @@ class FillSyncer:
             nf = sync_fills(
                 conn,
                 self.trader,
+                required=required,
                 on_new_fill=self._notify_fill if self._notifications_enabled() else None,
             )
-            ns = sync_settlements(conn, self.trader)
+            ns = sync_settlements(conn, self.trader, required=required)
             if nf or ns:
                 log.info("fill_sync: +%d fills, +%d settlements", nf, ns)
-        except Exception:
+            self._last_run = time.time()
+            return True
+        except Exception as exc:
             log.exception("fill_sync failed; will retry")
+            if required:
+                return False
+            return True
+
+    def maybe_sync(self, conn: sqlite3.Connection) -> None:
+        now = time.time()
+        if now - self._last_run < self.interval_s:
+            return
+        self._last_run = now
+        self.sync_now(conn, required=False)
 
     def _notifications_enabled(self) -> bool:
         return self.notifier is not None and self.notifier.enabled
@@ -328,3 +406,55 @@ class FillSyncer:
             f"_filled_"
         )
         self.notifier.send(msg)
+
+
+def sync_sibling_bot_dbs(
+    conn: sqlite3.Connection,
+    trader: KalshiTrader,
+    *,
+    required: bool = False,
+    limit: int = 200,
+) -> bool:
+    """Sync all sibling bot DBs that share this Kalshi account.
+
+    The current DB is intentionally skipped; callers should sync it with their
+    own FillSyncer so fill notifications remain single-owner. Sibling syncs
+    run without notifications and only match fills to each DB's own intents.
+    """
+    root = _db_root(conn)
+    current = _db_path(conn)
+    current_path = Path(current).resolve() if current else None
+    if root is None:
+        return True
+
+    try:
+        fills_data = trader.get_fills(limit=limit)
+        fills = fills_data.get("fills") or []
+        settlements_data = trader._request(
+            "GET", "/portfolio/settlements", params={"limit": limit}
+        )
+        settlements = settlements_data.get("settlements") or []
+    except Exception:
+        log.exception("sibling fill_sync fetch failed")
+        return False if required else True
+
+    ok = True
+    seen: set[Path] = set()
+    for rel in _BOT_DB_RELS:
+        path = (root / rel).resolve()
+        if path in seen or path == current_path or not path.exists():
+            continue
+        seen.add(path)
+        try:
+            with _connect_sync_db(path) as db:
+                _ensure_schema(db)
+                nf = sync_fills_from_rows(db, fills)
+                ns = sync_settlements_from_rows(db, settlements)
+                if nf or ns:
+                    log.info("sibling fill_sync[%s]: +%d fills, +%d settlements", path, nf, ns)
+        except Exception:
+            log.exception("sibling fill_sync failed for %s", path)
+            ok = False
+            if required:
+                return False
+    return ok

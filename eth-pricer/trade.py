@@ -23,7 +23,7 @@ from src.executor import (
     Executor,
 )
 from src.engine import EngineConfig, run
-from src.fill_sync import FillSyncer
+from src.fill_sync import FillSyncer, sync_sibling_bot_dbs
 from src.kalshi_client import KalshiClient
 from src.kalshi_trader import KalshiTrader
 from src.notify import TelegramKillListener, TelegramNotifier
@@ -169,14 +169,25 @@ def main() -> int:
             # 5min cadence: events close hourly, so this is far more than enough.
             scraper = SettlementScraper(scrape_client, interval_s=300.0)
 
+            def sync_before_trade() -> bool:
+                if syncer is None or trader is None:
+                    return True
+                own_ok = syncer.sync_now(db, required=True)
+                siblings_ok = sync_sibling_bot_dbs(db, trader, required=True)
+                if not (own_ok and siblings_ok):
+                    log.warning("pre-trade Kalshi sync failed; standing down this poll")
+                    return False
+                return True
+
             def on_poll(rows):
+                if not sync_before_trade():
+                    scraper.maybe_scrape(db)
+                    return
                 d = executor.handle_poll(rows)
                 if d.placed:
                     log.info("ORDER %s — %s", d.reason, d.ticket)
                 else:
                     log.debug("no order: %s", d.reason)
-                if syncer is not None:
-                    syncer.maybe_sync(db)
                 scraper.maybe_scrape(db)
 
             run(cfg, on_poll=on_poll, shadow_policy=profile.policy)
