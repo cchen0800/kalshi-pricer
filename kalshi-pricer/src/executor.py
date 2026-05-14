@@ -318,25 +318,11 @@ class Executor:
             _HARD_DAILY_LOSS_CEILING_USD,
         )
 
-        # Guard: daily loss
-        if snap.total_loss_today_usd() >= max_daily_loss:
-            return Decision(
-                False,
-                f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} "
-                f">= ${max_daily_loss:.2f} ({self.profile.max_daily_loss_pct:.0%} of ${portfolio_usd:.0f})",
-            )
         account_loss = account_loss_today_usd(self.conn)
         max_account_loss = min(
             _ACCOUNT_DAILY_LOSS_PCT * portfolio_usd,
             _HARD_ACCOUNT_DAILY_LOSS_CEILING_USD,
         )
-        if account_loss is None:
-            return Decision(False, "cannot read shared account loss (fail-closed)")
-        if account_loss >= max_account_loss:
-            return Decision(
-                False,
-                f"account loss limit hit: ${account_loss:.2f} >= ${max_account_loss:.2f}",
-            )
 
         # Guard: time to close. Runs before the candidate scan so we don't
         # waste cycles on a poll we won't act on, and so the message doesn't
@@ -383,6 +369,24 @@ class Executor:
                 self._order_times.popleft()
             if len(self._order_times) >= MAX_ORDERS_PER_MINUTE:
                 break
+
+            if side.startswith("BUY"):
+                if snap.total_loss_today_usd() >= max_daily_loss:
+                    last_decision = Decision(
+                        False,
+                        f"daily loss limit hit: ${snap.total_loss_today_usd():.2f} "
+                        f">= ${max_daily_loss:.2f} ({self.profile.max_daily_loss_pct:.0%} of ${portfolio_usd:.0f})",
+                    )
+                    continue
+                if account_loss is None:
+                    last_decision = Decision(False, "cannot read shared account loss (fail-closed)")
+                    continue
+                if account_loss >= max_account_loss:
+                    last_decision = Decision(
+                        False,
+                        f"account loss limit hit: ${account_loss:.2f} >= ${max_account_loss:.2f}",
+                    )
+                    continue
 
             ticket = self._build_ticket(row, side, edge, working_snap, max_notional)
             if ticket is None:
