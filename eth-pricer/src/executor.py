@@ -82,8 +82,8 @@ def _format_event(event_ticker: str) -> str:
 # bots (notional cap, edge floor, kill-file, COID prefix) is profile-scoped.
 # Anything that should never differ between bots stays module-level here.
 MAX_CONTRACTS_PER_ORDER = 20          # safety backstop; edge scaling + notional cap bind first
-MAX_CONTRACTS_PER_STRIKE = 10
-MAX_CONTRACTS_PER_EVENT = 20          # same-side cap across the strike ladder of one event.
+MAX_CONTRACTS_PER_STRIKE = 15
+MAX_CONTRACTS_PER_EVENT = 30          # same-side cap across the strike ladder of one event.
                                       # Strikes within an event are 100% correlated to the same
                                       # final spot — a directional thesis stacked across N strikes
                                       # is one bet, not N.
@@ -113,7 +113,7 @@ FULL_CONVICTION_EDGE_CENTS = 10.0 # log scaling saturates here; edges above this
 # a typo can never unlock more risk than the ceiling allows.
 _MAX_NOTIONAL_CEILING_PCT = 1.0       # no profile can exceed 100% of portfolio
 _MAX_DAILY_LOSS_CEILING_PCT = 0.50    # no profile can lose >50% of portfolio/day
-_HARD_NOTIONAL_CEILING_USD = 100.0    # backstop: balance-fetch bug can't unlock infinite
+_HARD_NOTIONAL_CEILING_USD = 150.0    # backstop: balance-fetch bug can't unlock infinite
 _HARD_DAILY_LOSS_CEILING_USD = 50.0
 _MIN_EDGE_FLOOR_CENTS = 2.0           # below this, fee + spread will eat the edge
 _BALANCE_CACHE_TTL_S = 30.0           # don't spam Kalshi in fast-poll (3s)
