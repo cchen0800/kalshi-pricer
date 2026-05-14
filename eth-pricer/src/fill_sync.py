@@ -149,7 +149,6 @@ def sync_fills(
         count = int(round(_f(f.get("count_fp") or f.get("count"))))
         fee = _f(f.get("fee_cost"))
         action = f.get("action") or ""
-        cash_delta = -(price * count + fee) if action == "buy" else (price * count - fee)
         ts_ms = 0
         ct = f.get("created_time")
         if ct:
@@ -161,6 +160,15 @@ def sync_fills(
         order_id = f.get("order_id")
         intent = order_id_to_intent.get(order_id) if order_id else None
         intent_id = intent["id"] if intent else None
+        effective_side = intent["side"] if intent else side
+        effective_action = intent["action"] if intent else action
+        effective_price = (1.0 - price) if effective_side != side else price
+        effective_price_cents = int(round(effective_price * 100))
+        cash_delta = (
+            -(effective_price * count + fee)
+            if effective_action == "buy"
+            else (effective_price * count - fee)
+        )
 
         cur = conn.execute(
             """
@@ -182,9 +190,9 @@ def sync_fills(
                 on_new_fill({
                     **intent,
                     "ts_ms": ts_ms,
-                    "fill_side": side,
-                    "fill_action": action,
-                    "fill_price_cents": fill_price_cents,
+                    "fill_side": effective_side,
+                    "fill_action": effective_action,
+                    "fill_price_cents": effective_price_cents,
                     "fill_count": count,
                     "fill_fee_usd": fee,
                     "fill_cash_delta_usd": cash_delta,

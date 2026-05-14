@@ -38,7 +38,14 @@ class FakeNotifier:
         self.messages.append(text)
 
 
-def _insert_intent(db: sqlite3.Connection, *, order_id: str = "order-1") -> None:
+def _insert_intent(
+    db: sqlite3.Connection,
+    *,
+    order_id: str = "order-1",
+    side: str = "no",
+    action: str = "buy",
+    limit_price_cents: int = 66,
+) -> None:
     db.execute(
         """
         INSERT INTO intended_orders (
@@ -50,8 +57,8 @@ def _insert_intent(db: sqlite3.Connection, *, order_id: str = "order-1") -> None
         """,
         (
             int(time.time() * 1000), "live", "KXBTCD-26MAY1315",
-            "KXBTCD-26MAY1315-T78900", "no", "buy",
-            66, 10, 6.60, 0.267, None, 5.3, 51.0, 78_744.0,
+            "KXBTCD-26MAY1315-T78900", side, action,
+            limit_price_cents, 10, limit_price_cents / 10.0, 0.267, None, 5.3, 51.0, 78_744.0,
             "btcp-client-1", "submitted", order_id, "btc-selective",
         ),
     )
@@ -97,7 +104,38 @@ def test_fill_sync_does_not_notify_unmatched_fill(db):
         "created_time": "2026-05-13T21:03:00Z",
     }
     syncer = FillSyncer(FakeTrader([fill]), interval_s=0, notifier=notifier)
+    syncer._notify_after_ts_ms = 0
 
     syncer.maybe_sync(db)
 
     assert notifier.messages == []
+
+
+def test_fill_sync_notifies_sell_no_using_intended_side(db):
+    _insert_intent(db, side="no", action="sell", limit_price_cents=24)
+    notifier = FakeNotifier()
+    fill = {
+        "trade_id": "trade-sell-no",
+        "order_id": "order-1",
+        "ticker": "KXBTCD-26MAY1315-T78900",
+        # Kalshi mirrors SELL_NO as side=yes/action=sell with the YES price.
+        "side": "yes",
+        "action": "sell",
+        "count": 10,
+        "yes_price_dollars": 0.76,
+        "fee_cost": "0.13",
+        "created_time": "2026-05-13T21:03:00Z",
+    }
+    syncer = FillSyncer(FakeTrader([fill]), interval_s=0, notifier=notifier)
+    syncer._notify_after_ts_ms = 0
+
+    syncer.maybe_sync(db)
+
+    assert len(notifier.messages) == 1
+    msg = notifier.messages[0]
+    assert "SELL NO FILLED" in msg
+    assert "10 x 24¢" in msg
+    cash_delta = db.execute(
+        "SELECT cash_delta_usd FROM fills WHERE kalshi_trade_id='trade-sell-no'"
+    ).fetchone()[0]
+    assert cash_delta == pytest.approx(2.27)
