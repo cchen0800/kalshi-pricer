@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS intended_orders (
     count               INTEGER NOT NULL,
     notional_usd        REAL    NOT NULL,
     model_prob          REAL    NOT NULL,
+    model_prob_calibrated REAL,                      -- calibrated probability used for edge; NULL on legacy rows
     edge_cents          REAL    NOT NULL,
     minutes_left        REAL    NOT NULL,
     spot                REAL    NOT NULL,
@@ -180,6 +181,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(intended_orders)")}
     if "bot_id" not in cols:
         conn.execute("ALTER TABLE intended_orders ADD COLUMN bot_id TEXT")
+    if "model_prob_calibrated" not in cols:
+        conn.execute("ALTER TABLE intended_orders ADD COLUMN model_prob_calibrated REAL")
     # Always ensure the index exists (covers both fresh and migrated DBs;
     # has to run after the ALTER above on old DBs).
     conn.execute(
