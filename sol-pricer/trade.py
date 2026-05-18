@@ -176,7 +176,12 @@ def main() -> int:
                 if syncer is None or trader is None:
                     return True
                 own_ok = syncer.sync_now(db, required=True)
-                siblings_ok = sync_sibling_bot_dbs(db, trader, required=True)
+                siblings_ok = sync_sibling_bot_dbs(
+                    db,
+                    trader,
+                    required=True,
+                    on_new_fill=syncer._notify_fill if syncer._notifications_enabled() else None,
+                )
                 if not (own_ok and siblings_ok):
                     log.warning("pre-trade Kalshi sync failed; standing down this poll")
                     return False

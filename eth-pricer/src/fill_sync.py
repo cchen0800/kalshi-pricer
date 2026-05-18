@@ -414,12 +414,14 @@ def sync_sibling_bot_dbs(
     *,
     required: bool = False,
     limit: int = 200,
+    on_new_fill: Callable[[dict[str, Any]], None] | None = None,
 ) -> bool:
     """Sync all sibling bot DBs that share this Kalshi account.
 
     The current DB is intentionally skipped; callers should sync it with their
-    own FillSyncer so fill notifications remain single-owner. Sibling syncs
-    run without notifications and only match fills to each DB's own intents.
+    own FillSyncer. If a sibling sync wins the race to insert a fill, pass
+    `on_new_fill` so the fill still alerts exactly once; INSERT OR IGNORE keeps
+    repeated sibling syncs from duplicating notifications.
     """
     root = _db_root(conn)
     current = _db_path(conn)
@@ -448,7 +450,7 @@ def sync_sibling_bot_dbs(
         try:
             with _connect_sync_db(path) as db:
                 _ensure_schema(db)
-                nf = sync_fills_from_rows(db, fills)
+                nf = sync_fills_from_rows(db, fills, on_new_fill=on_new_fill)
                 ns = sync_settlements_from_rows(db, settlements)
                 if nf or ns:
                     log.info("sibling fill_sync[%s]: +%d fills, +%d settlements", path, nf, ns)

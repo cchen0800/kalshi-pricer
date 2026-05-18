@@ -189,3 +189,49 @@ def test_sync_sibling_bot_dbs_updates_matched_sibling_fills(tmp_path):
         assert current.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
     finally:
         current.close()
+
+
+def test_sync_sibling_bot_dbs_notifies_new_sibling_fill_once(tmp_path):
+    root = tmp_path
+    current_dir = root / "kalshi-pricer"
+    sibling_dir = root / "eth-pricer"
+    current_dir.mkdir()
+    sibling_dir.mkdir()
+    current = connect(current_dir / "pricer.db")
+    sibling = connect(sibling_dir / "pricer.db")
+    try:
+        _insert_intent(sibling, order_id="sibling-order")
+    finally:
+        sibling.close()
+
+    fill = {
+        "trade_id": "sibling-trade",
+        "order_id": "sibling-order",
+        "ticker": "KXBTCD-26MAY1315-T78900",
+        "side": "no",
+        "action": "buy",
+        "count": 10,
+        "no_price_dollars": 0.66,
+        "fee_cost": "0.12",
+        "created_time": "2026-05-13T21:03:00Z",
+    }
+    notifications: list[dict] = []
+
+    try:
+        assert sync_sibling_bot_dbs(
+            current,
+            FakeTrader([fill]),
+            required=True,
+            on_new_fill=notifications.append,
+        ) is True
+        assert sync_sibling_bot_dbs(
+            current,
+            FakeTrader([fill]),
+            required=True,
+            on_new_fill=notifications.append,
+        ) is True
+        assert len(notifications) == 1
+        assert notifications[0]["kalshi_trade_id"] == "sibling-trade"
+        assert notifications[0]["bot_id"] == "btc-selective"
+    finally:
+        current.close()
